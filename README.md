@@ -1,3 +1,5 @@
+<img src="./block-recurrent-transformer.png" width="450px"></img>
+
 ## Block Recurrent Transformer - Pytorch (wip)
 
 Implementation of <a href="https://arxiv.org/abs/2203.07852">Block Recurrent Transformer</a> - Pytorch
