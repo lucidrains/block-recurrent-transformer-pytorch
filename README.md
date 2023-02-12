@@ -15,3 +15,5 @@ Implementation of <a href="https://arxiv.org/abs/2203.07852">Block Recurrent Tra
     volume  = {abs/2203.07852}
 }
 ```
+
+*Memory is Attention through Time* - Alex Graves
