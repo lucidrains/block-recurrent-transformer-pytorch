@@ -49,7 +49,8 @@ acc_print = accelerator.print
 model = BlockRecurrentTransformer(
     num_tokens = 256,
     dim = 512,
-    depth = 8
+    depth = 8,
+    recurrent_layers = tuple()
 )
 
 model.to(device)
@@ -94,7 +95,7 @@ for i in tqdm.tqdm(range(NUM_BATCHES), mininterval=10.0, desc="training"):
     model.train()
 
     for _ in range(GRADIENT_ACCUMULATE_EVERY):
-        loss = model(next(train_loader), return_loss = True)
+        loss, *_ = model(next(train_loader), return_loss = True)
         accelerator.backward(loss / GRADIENT_ACCUMULATE_EVERY)
 
     acc_print(f"training loss: {loss.item()}")
@@ -106,7 +107,7 @@ for i in tqdm.tqdm(range(NUM_BATCHES), mininterval=10.0, desc="training"):
     if i % VALIDATE_EVERY == 0:
         model.eval()
         with torch.no_grad():
-            loss = model(next(val_loader), return_loss = True)
+            loss, *_ = model(next(val_loader), return_loss = True)
             accelerator.print(f"validation loss: {loss.item()}")
 
     if i % GENERATE_EVERY == 0:
