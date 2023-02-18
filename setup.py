@@ -18,6 +18,7 @@ setup(
     'recurrence'
   ],
   install_requires=[
+    'beartype',
     'einops>=0.4',
     'torch>=1.6',
   ],
