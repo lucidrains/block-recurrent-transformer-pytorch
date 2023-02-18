@@ -21,6 +21,17 @@ def eval_decorator(fn):
 def l2norm(t):
     return F.normalize(t, dim = -1)
 
+# bias-less layernorm
+
+class LayerNorm(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.ones(dim))
+        self.register_buffer("beta", torch.zeros(dim))
+
+    def forward(self, x):
+        return F.layer_norm(x, x.shape[-1:], self.gamma, self.beta)
+
 # sampling helpers
 
 def gumbel_noise(t):
@@ -48,6 +59,22 @@ def top_k(logits, thres = 0.9):
     probs.scatter_(1, ind, val)
     return probs
 
+# geglu feedforward
+
+class GEGLU(nn.Module):
+    def forward(self, x):
+        x, gate = x.chunk(2, dim = -1)
+        return F.gelu(gate) * x
+
+def FeedForward(dim, mult = 4):
+    inner_dim = int(dim * mult * 2 / 3)
+    return nn.Sequential(
+        LayerNorm(dim),
+        nn.Linear(dim, inner_dim * 2, bias = False),
+        GEGLU(),
+        nn.Linear(inner_dim, dim, bias = False)
+    )
+
 # attention
 
 class Attention(nn.Module):
@@ -60,6 +87,8 @@ class Attention(nn.Module):
         cosine_sim_scale = 8
     ):
         super().__init__()
+        self.causal = causal
+
         assert not (cosine_sim and qk_rmsnorm)
         self.cosine_sim = cosine_sim
         self.qk_rmsnorm = qk_rmsnorm
@@ -83,7 +112,7 @@ class Attention(nn.Module):
 
         kv_einsum = 'b j d' if k.ndim == 3 else 'b h j d'
 
-        sim = einsum(f'b h i d, {kv_einsum} -> b h i j') * scale
+        sim = einsum(f'b h i d, {kv_einsum} -> b h i j', q, k) * scale
 
         max_neg_value = -torch.finfo(sim.dtype).max
 
@@ -102,6 +131,39 @@ class Attention(nn.Module):
 
         return out
 
+class AttentionBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        causal = True,
+        dim_head = 64,
+        heads = 8,
+        cosine_sim = False,
+        qk_rmsnorm = False,
+        cosine_sim_scale = 8
+    ):
+        super().__init__()
+        inner_dim = dim_head * heads
+        self.heads = heads
+
+        self.norm = LayerNorm(dim)
+
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
+        self.attn = Attention(dim_head, causal = causal, cosine_sim = cosine_sim, qk_rmsnorm = qk_rmsnorm, cosine_sim_scale = cosine_sim_scale)
+
+        self.to_out = nn.Linear(inner_dim, dim, bias = False)
+
+    def forward(self, x):
+        x = self.norm(x)
+
+        q, k, v = self.to_qkv(x).chunk(3, dim = -1)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), (q, k, v))
+
+        out = self.attn(q, k, v)
+
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)
+
 # classes
 
 class BlockRecurrentTransformer(nn.Module):
@@ -112,10 +174,26 @@ class BlockRecurrentTransformer(nn.Module):
         dim,
         depth,
         dim_head = 64,
-        heads = 8
+        heads = 8,
+        cosine_sim = False,
+        qk_rmsnorm = False,
+        cosine_sim_scale = 8,
+        ff_mult = 4
     ):
         super().__init__()
         self.token_emb = nn.Embedding(num_tokens, dim)
+
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                AttentionBlock(dim, causal = True, dim_head = dim_head, heads = heads, cosine_sim = cosine_sim, qk_rmsnorm = qk_rmsnorm, cosine_sim_scale = cosine_sim_scale),
+                FeedForward(dim, mult = ff_mult)
+            ]))
+
+        self.to_logits = nn.Sequential(
+            LayerNorm(dim),
+            nn.Linear(dim, num_tokens, bias = False)
+        )
 
     @torch.no_grad()
     @eval_decorator
@@ -125,4 +203,8 @@ class BlockRecurrentTransformer(nn.Module):
     def forward(self, x):
         x = self.token_emb(x)
 
-        return x
+        for attn, ff in self.layers:
+            x = attn(x) + x
+            x = ff(x) + x
+
+        return self.to_logits(x)
