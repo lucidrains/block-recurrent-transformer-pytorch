@@ -33,6 +33,18 @@ out, mems2, states2 = model(seq, xl_memories = mems1, states = states1)
 out, mems3, states3 = model(seq, xl_memories = mems2, states = states2)
 ```
 
+## Todo
+
+- [ ] use dynamic positional bias + some improvisation for position of memories
+- [ ] setup local attention blocks, as in the paper
+- [ ] run a few experiments of fixed gating in regular transformers
+- [ ] add structured dropout to memories and states
+- [ ] make sure attention class can support batch-less dimensions (conditionals on einsum equations) and simplify some logic - allow for single head key / values too
+- [ ] wrapper transformer class for training and generating, auto-managing states and xl memories
+- [ ] revisit <a href="https://github.com/lucidrains/memformer">memformer</a> as well as <a href="https://github.com/lucidrains/x-transformers#enhanced-recurrence">enhanced recurrence</a>
+- [ ] test full system on enwik8 locally and ablate states and memories and see effects first  hand
+
+
 ## Citations
 
 ```bibtex
