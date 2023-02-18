@@ -5,10 +5,17 @@ from torch import nn, einsum
 
 from einops import rearrange, repeat
 
+from beartype import beartype
+from beartype.door import is_bearable
+from beartype.typing import Optional, List, Tuple
+
 # helpers
 
 def exists(val):
     return val is not None
+
+def default(val, d):
+    return val if exists(val) else d
 
 def eval_decorator(fn):
     def inner(self, *args, **kwargs):
@@ -146,19 +153,32 @@ class AttentionBlock(nn.Module):
 
         self.to_out = nn.Linear(inner_dim, dim, bias = False)
 
-    def forward(self, x):
+    def forward(
+        self,
+        x,
+        xl_memories: Optional[torch.Tensor] = None
+    ):
         x = self.norm(x)
 
         q, k, v = self.to_qkv(x).chunk(3, dim = -1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), (q, k, v))
 
+        memories = torch.stack((k, v))
+
+        if exists(xl_memories):
+            past_k, past_v = xl_memories
+            k = torch.cat((past_k, k), dim = -2)
+            v = torch.cat((past_v, v), dim = -2)
+
         out = self.attn(q, k, v)
 
         out = rearrange(out, 'b h n d -> b n (h d)')
-        return self.to_out(out)
+
+        return self.to_out(out), memories
 
 # classes
 
+@beartype
 class BlockRecurrentTransformer(nn.Module):
     def __init__(
         self,
@@ -169,13 +189,19 @@ class BlockRecurrentTransformer(nn.Module):
         dim_head = 64,
         heads = 8,
         cosine_sim = False,
-        qk_rmsnorm = False,
+        qk_rmsnorm = True,
         cosine_sim_scale = 8,
         ff_mult = 4,
         ignore_index = -100,
-        max_seq_len = 2048
+        max_seq_len = 2048,
+        xl_memories_layers: Optional[Tuple[int, ...]] = None,
     ):
         super().__init__()
+        xl_memories_layers = default(xl_memories_layers, tuple(range(1, depth + 1)))
+        self.xl_memories_layers = set(xl_memories_layers)
+
+        assert all([0 < layer <= depth for layer in xl_memories_layers])
+
         self.token_emb = nn.Embedding(num_tokens, dim)
 
         self.layers = nn.ModuleList([])
@@ -206,7 +232,7 @@ class BlockRecurrentTransformer(nn.Module):
         output = prime
 
         for _ in range(length):
-            logits = self.forward(output[:, -self.max_seq_len:])
+            logits, _ = self.forward(output[:, -self.max_seq_len:])
             logits = logits[:, -1]
 
             filtered_logits = top_k(logits, thres = filter_thres)
@@ -217,20 +243,56 @@ class BlockRecurrentTransformer(nn.Module):
 
         return output[:, orig_len:]
 
-    def forward(self, x, return_loss = False):
+    def forward(
+        self,
+        x,
+        return_loss = False,
+        xl_memories: List[torch.Tensor] = tuple(),
+    ):
         if return_loss:
             x, labels = x[:, :-1], x[:, 1:]
 
         x = self.token_emb(x)
 
-        for attn, ff in self.layers:
-            x = attn(x) + x
+        xl_memories = iter(xl_memories)
+
+        next_xl_memories = []
+
+        for ind, (attn, ff) in enumerate(self.layers):
+
+            # determine if the layer requires transformer xl memories
+
+            layer = ind + 1
+            is_xl_layer = layer in self.xl_memories_layers
+
+            # whether to pass in xl memories
+
+            attn_kwargs = dict()
+
+            if is_xl_layer:
+                attn_kwargs = dict(xl_memories = next(xl_memories, None))
+
+            # attention layer
+
+            residual = x
+            attn_branch_out, layer_xl_memories = attn(x, **attn_kwargs)
+
+            # save current xl memories if needed
+
+            if is_xl_layer:
+                next_xl_memories.append(layer_xl_memories.detach())
+
+            x = attn_branch_out + residual
+
+            # feedforward layer
+
             x = ff(x) + x
 
         logits = self.to_logits(x)
 
         if not return_loss:
-            return logits
+            return logits, next_xl_memories
 
         logits = rearrange(logits, 'b n c -> b c n')
-        return F.cross_entropy(logits, labels, ignore_index = self.ignore_index)
+        loss = F.cross_entropy(logits, labels, ignore_index = self.ignore_index)
+        return loss, next_xl_memories
