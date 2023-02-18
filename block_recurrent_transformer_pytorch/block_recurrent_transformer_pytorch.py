@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum
@@ -34,23 +35,15 @@ class LayerNorm(nn.Module):
 
 # sampling helpers
 
+def log(t, eps = 1e-20):
+    return torch.log(t.clamp(min = eps))
+
 def gumbel_noise(t):
     noise = torch.zeros_like(t).uniform_(0, 1)
     return -log(-log(noise))
 
 def gumbel_sample(t, temperature = 1., dim = -1):
     return ((t / max(temperature, 1e-10)) + gumbel_noise(t)).argmax(dim = dim)
-
-def top_p(logits, thres = 0.9):
-    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-    cum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-
-    sorted_indices_to_remove = cum_probs > (1 - thres)
-    sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
-    sorted_indices_to_remove[:, 0] = 0
-
-    sorted_logits[sorted_indices_to_remove] = float('-inf')
-    return sorted_logits.scatter(1, sorted_indices, sorted_logits)
 
 def top_k(logits, thres = 0.9):
     k = math.ceil((1 - thres) * logits.shape[-1])
@@ -122,7 +115,7 @@ class Attention(nn.Module):
 
         if self.causal:
             i, j = sim.shape[-2:]
-            causal_mask = torch.ones((i, j), device = q.device).triu(j - i + 1)
+            causal_mask = torch.ones((i, j), device = q.device, dtype = torch.bool).triu(j - i + 1)
             sim = sim.masked_fill(causal_mask, max_neg_value)
 
         attn = sim.softmax(dim = -1)
@@ -178,7 +171,9 @@ class BlockRecurrentTransformer(nn.Module):
         cosine_sim = False,
         qk_rmsnorm = False,
         cosine_sim_scale = 8,
-        ff_mult = 4
+        ff_mult = 4,
+        ignore_index = -100,
+        max_seq_len = 2048
     ):
         super().__init__()
         self.token_emb = nn.Embedding(num_tokens, dim)
@@ -195,16 +190,47 @@ class BlockRecurrentTransformer(nn.Module):
             nn.Linear(dim, num_tokens, bias = False)
         )
 
+        self.max_seq_len = max_seq_len
+        self.ignore_index = ignore_index
+
     @torch.no_grad()
     @eval_decorator
-    def generate(self, length):
-        pass
+    def generate(
+        self,
+        length,
+        prime,
+        temperature = 1.,
+        filter_thres = 0.9
+    ):
+        orig_len = prime.shape[-1]
+        output = prime
 
-    def forward(self, x):
+        for _ in range(length):
+            logits = self.forward(output[:, -self.max_seq_len:])
+            logits = logits[:, -1]
+
+            filtered_logits = top_k(logits, thres = filter_thres)
+            sampled = gumbel_sample(filtered_logits, temperature = temperature)
+            sampled = rearrange(sampled, 'b -> b 1')
+
+            output = torch.cat((output, sampled), dim = -1)
+
+        return output[:, orig_len:]
+
+    def forward(self, x, return_loss = False):
+        if return_loss:
+            x, labels = x[:, :-1], x[:, 1:]
+
         x = self.token_emb(x)
 
         for attn, ff in self.layers:
             x = attn(x) + x
             x = ff(x) + x
 
-        return self.to_logits(x)
+        logits = self.to_logits(x)
+
+        if not return_loss:
+            return logits
+
+        logits = rearrange(logits, 'b n c -> b c n')
+        return F.cross_entropy(logits, labels, ignore_index = self.ignore_index)
