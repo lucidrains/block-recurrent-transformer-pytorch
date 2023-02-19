@@ -372,8 +372,8 @@ class BlockRecurrentTransformer(nn.Module):
         self,
         x,
         return_loss = False,
-        xl_memories: List[torch.Tensor] = tuple(),
-        states: List[torch.Tensor] = tuple(),
+        xl_memories: List[torch.Tensor] = [],
+        states: List[torch.Tensor] = [],
 
     ):
         device = x.device
