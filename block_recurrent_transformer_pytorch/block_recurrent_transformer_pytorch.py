@@ -292,7 +292,8 @@ class BlockRecurrentTransformer(nn.Module):
         xl_memories_layers: Optional[Tuple[int, ...]] = None,
         recurrent_layers: Optional[Tuple[int, ...]] = None,
         num_state_vectors = 512,
-        dynamic_pos_bias_dim = None
+        dynamic_pos_bias_dim = None,
+        enhanced_recurrence = False
     ):
         super().__init__()
         xl_memories_layers = default(xl_memories_layers, tuple(range(1, depth + 1)))
@@ -343,6 +344,8 @@ class BlockRecurrentTransformer(nn.Module):
 
         self.max_seq_len = max_seq_len
         self.ignore_index = ignore_index
+
+        self.enhanced_recurrence = enhanced_recurrence
 
     @torch.no_grad()
     @eval_decorator
@@ -402,6 +405,11 @@ class BlockRecurrentTransformer(nn.Module):
 
         pos_bias = pos_bias[rel_pos]
         pos_bias = rearrange(pos_bias, 'i j h -> h i j')
+
+        # enhanced recurrence
+
+        if self.enhanced_recurrence and len(xl_memories) > 1:
+            xl_memories = [*xl_memories[1:], xl_memories[0]]
 
         # ready xl memories and states
 

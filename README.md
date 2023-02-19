@@ -2,7 +2,7 @@
 
 ## Block Recurrent Transformer - Pytorch (wip)
 
-Implementation of <a href="https://arxiv.org/abs/2203.07852">Block Recurrent Transformer</a> - Pytorch
+Implementation of <a href="https://arxiv.org/abs/2203.07852">Block Recurrent Transformer</a> - Pytorch. The highlight of the paper is its reported ability to remember something up to 60k tokens ago.
 
 ## Install
 
@@ -36,6 +36,7 @@ out, mems3, states3 = model(seq, xl_memories = mems2, states = states2)
 ## Todo
 
 - [x] use dynamic positional bias
+- [x] add enhanced recurrence
 
 - [ ] think about giving memories information to the dynamic pos bias mlp
 - [ ] setup local attention blocks, as in the paper
@@ -43,7 +44,7 @@ out, mems3, states3 = model(seq, xl_memories = mems2, states = states2)
 - [ ] add structured dropout to memories and states
 - [ ] make sure attention class can support batch-less dimensions (conditionals on einsum equations) and simplify some logic - allow for single head key / values too
 - [ ] wrapper transformer class for training and generating, auto-managing states and xl memories
-- [ ] revisit <a href="https://github.com/lucidrains/memformer">memformer</a> as well as <a href="https://github.com/lucidrains/x-transformers#enhanced-recurrence">enhanced recurrence</a>
+- [ ] revisit <a href="https://github.com/lucidrains/memformer">memformer</a>
 - [ ] test full system on enwik8 locally and ablate states and memories and see effects first  hand
 
 
@@ -56,6 +57,16 @@ out, mems3, states3 = model(seq, xl_memories = mems2, states = states2)
     journal = {ArXiv},
     year    = {2022},
     volume  = {abs/2203.07852}
+}
+```
+
+```bibtex
+@article{Ding2021ERNIEDocAR,
+    title   = {ERNIE-Doc: A Retrospective Long-Document Modeling Transformer},
+    author  = {Siyu Ding and Junyuan Shang and Shuohuan Wang and Yu Sun and Hao Tian and Hua Wu and Haifeng Wang},
+    journal = {ArXiv},
+    year    = {2021},
+    volume  = {abs/2012.15688}
 }
 ```
 
