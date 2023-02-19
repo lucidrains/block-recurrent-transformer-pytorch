@@ -26,8 +26,16 @@ def eval_decorator(fn):
         return out
     return inner
 
+def divisible_by(numer, denom):
+    return (numer % denom) == 0
+
 def l2norm(t):
     return F.normalize(t, dim = -1)
+
+def pad_at_dim(t, pad, dim = -1, value = 0.):
+    dims_from_right = (- dim - 1) if dim < 0 else (t.ndim - dim - 1)
+    zeros = ((0, 0) * dims_from_right)
+    return F.pad(t, (*zeros, *pad), value = value)
 
 # bias-less layernorm
 
@@ -110,9 +118,9 @@ class Attention(nn.Module):
             q = q * self.q_scale
             k = k * self.k_scale
 
-        kv_einsum = 'b j d' if k.ndim == 3 else 'b h j d'
+        kv_einsum = '... j d' if k.ndim == 3 else '... h j d'
 
-        sim = einsum(f'b h i d, {kv_einsum} -> b h i j', q, k) * scale
+        sim = einsum(f'... h i d, {kv_einsum} -> ... h i j', q, k) * scale
 
         if exists(attn_bias):
             sim = sim + attn_bias
@@ -120,7 +128,6 @@ class Attention(nn.Module):
         max_neg_value = -torch.finfo(sim.dtype).max
 
         if exists(mask):
-            mask = rearrange(mask, 'b j -> b 1 1 j')
             sim = sim.masked_fill(~mask, max_neg_value)
 
         if self.causal:
@@ -130,7 +137,7 @@ class Attention(nn.Module):
 
         attn = sim.softmax(dim = -1)
 
-        out = einsum(f'b h i j, {kv_einsum} -> b h i d', attn, v)
+        out = einsum(f'... h i j, {kv_einsum} -> ... h i d', attn, v)
 
         return out
 
@@ -138,13 +145,14 @@ class AttentionBlock(nn.Module):
     def __init__(
         self,
         dim,
+        block_width,
         causal = True,
         dim_head = 64,
         heads = 8,
         cosine_sim = False,
         qk_rmsnorm = False,
         cosine_sim_scale = 8,
-        num_state_vectors = 0
+        num_state_vectors = 0,
     ):
         super().__init__()
         inner_dim = dim_head * heads
@@ -155,6 +163,7 @@ class AttentionBlock(nn.Module):
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
         self.attn = Attention(dim_head, causal = causal, cosine_sim = cosine_sim, qk_rmsnorm = qk_rmsnorm, cosine_sim_scale = cosine_sim_scale)
 
+        self.block_width = block_width
         self.is_recurrent_layer = num_state_vectors > 0
 
         self.to_out = nn.Linear(inner_dim * (2 if self.is_recurrent_layer else 1), dim, bias = False)
@@ -185,31 +194,73 @@ class AttentionBlock(nn.Module):
         self,
         x,
         rel_pos_bias = None,
+        attn_mask = None,
         xl_memories: Optional[torch.Tensor] = None,
         states: Optional[torch.Tensor] = None
     ):
-        batch = x.shape[0]
+        batch, seq_len, _, width = *x.shape, self.block_width
+
+        # first make sure to pad the sequence length to multiple of the block widths
+        # for local attention
+
+        if not divisible_by(seq_len, width):
+            padding_to_width_multiple = math.ceil(seq_len / width) * width - seq_len
+            x = pad_at_dim(x, (0, padding_to_width_multiple), dim = -2, value = 0)
+
+        # pre normalization
 
         x = self.norm(x)
+
+        # queries, keys, values and split out heads
 
         q, k, v = self.to_qkv(x).chunk(3, dim = -1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), (q, k, v))
 
-        memories = torch.stack((k, v))
+        # bucket the queries, keys, values by block width
+
+        bq, bk, bv = map(lambda t: rearrange(t, 'b h (w n) d -> b w h n d', n = width), (q, k, v))
+
+        # save the last key / values as memories for recurrence
+
+        memories = torch.stack((bk[:, -1], bv[:, -1]))
 
         if exists(xl_memories):
+            # if past memories are passed in, concat as the first bucket
             past_k, past_v = xl_memories
-            k = torch.cat((past_k, k), dim = -2)
-            v = torch.cat((past_v, v), dim = -2)
+            past_k, past_v = map(lambda t: rearrange(t, 'b h n d -> b 1 h n d'), (past_k, past_v))
+            bk = torch.cat((past_k, bk), dim = 1)
+            bv = torch.cat((past_v, bv), dim = 1)
+        else:
+            # otherwise add padding
+            bk = pad_at_dim(bk, (1, 0), value = 0., dim = 1)
+            bv = pad_at_dim(bv, (1, 0), value = 0., dim = 1)
 
-        if exists(rel_pos_bias):
-            rel_pos_bias = rel_pos_bias[..., -k.shape[-2]:]
+            # and make sure not to attend to this padding
+            if exists(attn_mask):
+                attn_mask = repeat(attn_mask, 'i j -> w 1 i j', w = bq.shape[1])
+                attn_mask[0, 0, :, :width] = False
 
-        out = self.attn(q, k, v, attn_bias = rel_pos_bias)
+        # local attention with look back of one bucket - in paper they did total receptive field of 2 * block_width, with 1 block_width worth of memories, seems like a more efficient transformer-xl design?
 
-        out = rearrange(out, 'b h n d -> b n (h d)')
+        bk = torch.cat((bk[:, :-1], bk[:, 1:]), dim = -2)
+        bv = torch.cat((bv[:, :-1], bv[:, 1:]), dim = -2)
+
+        # attention, but of course
+
+        out = self.attn(bq, bk, bv, attn_bias = rel_pos_bias, mask = attn_mask)
+
+        # merge the heads as well as the buckets
+
+        out = rearrange(out, 'b w h n d -> b (w n) (h d)')
+
+        # in case there is padding during sampling, splice it out
+
+        out = out[:, :seq_len]
 
         new_states = None
+
+        # if designated a recurrent layer, do all the state logic
+        # it was hard moving this to a separate module, as the attention is closely intertwined between the current tokens and state tokens
 
         if self.is_recurrent_layer:
             if not exists(states):
@@ -288,7 +339,8 @@ class BlockRecurrentTransformer(nn.Module):
         cosine_sim_scale = 8,
         ff_mult = 4,
         ignore_index = -100,
-        max_seq_len = 2048,
+        max_seq_len = 1024,
+        block_width = 512,
         xl_memories_layers: Optional[Tuple[int, ...]] = None,
         recurrent_layers: Optional[Tuple[int, ...]] = None,
         num_state_vectors = 512,
@@ -327,6 +379,7 @@ class BlockRecurrentTransformer(nn.Module):
                 AttentionBlock(
                     dim,
                     causal = True,
+                    block_width = block_width,
                     dim_head = dim_head,
                     heads = heads,
                     cosine_sim = cosine_sim,
@@ -343,6 +396,10 @@ class BlockRecurrentTransformer(nn.Module):
         )
 
         self.max_seq_len = max_seq_len
+        self.block_width = block_width
+
+        assert divisible_by(max_seq_len, block_width)
+
         self.ignore_index = ignore_index
 
         self.enhanced_recurrence = enhanced_recurrence
@@ -386,8 +443,9 @@ class BlockRecurrentTransformer(nn.Module):
 
         # get sequence length i and j for dynamic pos bias
 
-        i = x.shape[-1]
-        j = i + (xl_memories[0].shape[-2] if len(xl_memories) > 0 else 0)
+        assert x.shape[-1] <= self.max_seq_len
+
+        w = self.block_width
 
         # token embedding
 
@@ -395,13 +453,16 @@ class BlockRecurrentTransformer(nn.Module):
 
         # dynamic pos bias
 
-        rel_dist = torch.arange(j, dtype = x.dtype, device = device)
+        rel_dist = torch.arange(w, dtype = x.dtype, device = device)
         rel_dist = rearrange(rel_dist, '... -> ... 1')
         pos_bias = self.dynamic_pos_bias_mlp(rel_dist)
 
-        i_arange = torch.arange(i, device = device)
-        j_arange = torch.arange(j, device = device)
-        rel_pos = ((rearrange(i_arange, 'i -> i 1') + j - i) - rearrange(j_arange, 'j -> 1 j')).abs()
+        i_arange = torch.arange(w, device = device)
+        j_arange = torch.arange(w * 2, device = device)
+        rel_pos = ((rearrange(i_arange, 'i -> i 1') + w) - rearrange(j_arange, 'j -> 1 j')).abs()
+
+        attn_mask = rel_pos < w  # make sure each token only looks back a block width
+        rel_pos = rel_pos.masked_fill(~attn_mask, 0)
 
         pos_bias = pos_bias[rel_pos]
         pos_bias = rearrange(pos_bias, 'i j h -> h i j')
@@ -430,7 +491,10 @@ class BlockRecurrentTransformer(nn.Module):
 
             # whether to pass in xl memories
 
-            attn_kwargs = dict(rel_pos_bias = pos_bias)
+            attn_kwargs = dict(
+                rel_pos_bias = pos_bias,
+                attn_mask = attn_mask
+            )
 
             if is_xl_layer:
                 attn_kwargs.update(xl_memories = next(xl_memories, None))

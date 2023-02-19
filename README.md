@@ -37,9 +37,9 @@ out, mems3, states3 = model(seq, xl_memories = mems2, states = states2)
 
 - [x] use dynamic positional bias
 - [x] add enhanced recurrence
+- [x] setup local attention blocks, as in the paper
 
 - [ ] think about giving memories information to the dynamic pos bias mlp
-- [ ] setup local attention blocks, as in the paper
 - [ ] run a few experiments of fixed gating in regular transformers
 - [ ] add structured dropout to memories and states
 - [ ] make sure attention class can support batch-less dimensions (conditionals on einsum equations) and simplify some logic - allow for single head key / values too
