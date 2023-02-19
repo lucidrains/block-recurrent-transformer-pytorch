@@ -98,7 +98,7 @@ class Attention(nn.Module):
             self.q_scale = nn.Parameter(torch.ones(dim_head))
             self.k_scale = nn.Parameter(torch.ones(dim_head))
 
-    def forward(self, q, k, v, mask = None):
+    def forward(self, q, k, v, mask = None, attn_bias = None):
 
         scale = q.shape[-1] ** -0.5
 
@@ -113,6 +113,9 @@ class Attention(nn.Module):
         kv_einsum = 'b j d' if k.ndim == 3 else 'b h j d'
 
         sim = einsum(f'b h i d, {kv_einsum} -> b h i j', q, k) * scale
+
+        if exists(attn_bias):
+            sim = sim + attn_bias
 
         max_neg_value = -torch.finfo(sim.dtype).max
 
@@ -181,6 +184,7 @@ class AttentionBlock(nn.Module):
     def forward(
         self,
         x,
+        rel_pos_bias = None,
         xl_memories: Optional[torch.Tensor] = None,
         states: Optional[torch.Tensor] = None
     ):
@@ -198,7 +202,10 @@ class AttentionBlock(nn.Module):
             k = torch.cat((past_k, k), dim = -2)
             v = torch.cat((past_v, v), dim = -2)
 
-        out = self.attn(q, k, v)
+        if exists(rel_pos_bias):
+            rel_pos_bias = rel_pos_bias[..., -k.shape[-2]:]
+
+        out = self.attn(q, k, v, attn_bias = rel_pos_bias)
 
         out = rearrange(out, 'b h n d -> b n (h d)')
 
@@ -284,7 +291,8 @@ class BlockRecurrentTransformer(nn.Module):
         max_seq_len = 2048,
         xl_memories_layers: Optional[Tuple[int, ...]] = None,
         recurrent_layers: Optional[Tuple[int, ...]] = None,
-        num_state_vectors = 512
+        num_state_vectors = 512,
+        dynamic_pos_bias_dim = None
     ):
         super().__init__()
         xl_memories_layers = default(xl_memories_layers, tuple(range(1, depth + 1)))
@@ -298,6 +306,15 @@ class BlockRecurrentTransformer(nn.Module):
         assert all([0 < layer <= depth for layer in recurrent_layers])
 
         self.token_emb = nn.Embedding(num_tokens, dim)
+
+        pos_mlp_dim = default(dynamic_pos_bias_dim, dim // 4)
+        self.dynamic_pos_bias_mlp = nn.Sequential(
+            nn.Linear(1, pos_mlp_dim),
+            nn.SiLU(),
+            nn.Linear(pos_mlp_dim, pos_mlp_dim),
+            nn.SiLU(),
+            nn.Linear(pos_mlp_dim, heads)
+        )
 
         self.layers = nn.ModuleList([])
 
@@ -359,10 +376,34 @@ class BlockRecurrentTransformer(nn.Module):
         states: List[torch.Tensor] = tuple(),
 
     ):
+        device = x.device
+
         if return_loss:
             x, labels = x[:, :-1], x[:, 1:]
 
+        # get sequence length i and j for dynamic pos bias
+
+        i = x.shape[-1]
+        j = i + (xl_memories[0].shape[-2] if len(xl_memories) > 0 else 0)
+
+        # token embedding
+
         x = self.token_emb(x)
+
+        # dynamic pos bias
+
+        rel_dist = torch.arange(j, dtype = x.dtype, device = device)
+        rel_dist = rearrange(rel_dist, '... -> ... 1')
+        pos_bias = self.dynamic_pos_bias_mlp(rel_dist)
+
+        i_arange = torch.arange(i, device = device)
+        j_arange = torch.arange(j, device = device)
+        rel_pos = ((rearrange(i_arange, 'i -> i 1') + j - i) - rearrange(j_arange, 'j -> 1 j')).abs()
+
+        pos_bias = pos_bias[rel_pos]
+        pos_bias = rearrange(pos_bias, 'i j h -> h i j')
+
+        # ready xl memories and states
 
         xl_memories = iter(xl_memories)
         states = iter(states)
@@ -381,7 +422,7 @@ class BlockRecurrentTransformer(nn.Module):
 
             # whether to pass in xl memories
 
-            attn_kwargs = dict()
+            attn_kwargs = dict(rel_pos_bias = pos_bias)
 
             if is_xl_layer:
                 attn_kwargs.update(xl_memories = next(xl_memories, None))

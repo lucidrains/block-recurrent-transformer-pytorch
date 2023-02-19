@@ -35,7 +35,9 @@ out, mems3, states3 = model(seq, xl_memories = mems2, states = states2)
 
 ## Todo
 
-- [ ] use dynamic positional bias + some improvisation for position of memories
+- [x] use dynamic positional bias
+
+- [ ] think about giving memories information to the dynamic pos bias mlp
 - [ ] setup local attention blocks, as in the paper
 - [ ] run a few experiments of fixed gating in regular transformers
 - [ ] add structured dropout to memories and states
