@@ -4,6 +4,10 @@
 
 Implementation of <a href="https://arxiv.org/abs/2203.07852">Block Recurrent Transformer</a> - Pytorch. The highlight of the paper is its reported ability to remember something up to 60k tokens ago.
 
+## Appreciation
+
+- <a href="https://stability.ai/">Stability.ai</a> for the generous sponsorship to work and open source cutting edge artificial intelligence research
+
 ## Install
 
 ```bash
@@ -38,12 +42,13 @@ out, mems3, states3 = model(seq, xl_memories = mems2, states = states2)
 - [x] use dynamic positional bias
 - [x] add enhanced recurrence
 - [x] setup local attention blocks, as in the paper
+- [x] wrapper transformer class for training
 
+- [ ] take care of generation with recurrence in `RecurrentTrainWrapper`
 - [ ] think about giving memories information to the dynamic pos bias mlp
 - [ ] run a few experiments of fixed gating in regular transformers
 - [ ] add structured dropout to memories and states
 - [ ] make sure attention class can support batch-less dimensions (conditionals on einsum equations) and simplify some logic - allow for single head key / values too
-- [ ] wrapper transformer class for training and generating, auto-managing states and xl memories
 - [ ] revisit <a href="https://github.com/lucidrains/memformer">memformer</a>
 - [ ] test full system on enwik8 locally and ablate states and memories and see effects first  hand
 

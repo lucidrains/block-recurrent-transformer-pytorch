@@ -413,13 +413,14 @@ class BlockRecurrentTransformer(nn.Module):
     @eval_decorator
     def generate(
         self,
-        length,
         prime,
+        length = None,
         xl_memories: List[torch.Tensor] = [],
         states: List[torch.Tensor] = [],
         temperature = 1.,
         filter_thres = 0.9
     ):
+        length = default(length, self.max_seq_len)
         orig_len = prime.shape[-1]
         output = prime
 
@@ -439,7 +440,8 @@ class BlockRecurrentTransformer(nn.Module):
 
             output = torch.cat((output, sampled), dim = -1)
 
-        return output[:, orig_len:]
+        output = output[:, orig_len:]
+        return output
 
     def forward(
         self,
@@ -551,3 +553,49 @@ class BlockRecurrentTransformer(nn.Module):
         loss = F.cross_entropy(logits, labels, ignore_index = self.ignore_index)
 
         return loss, next_xl_memories, next_states
+
+# recurrent trainer wrapper
+
+@beartype
+class RecurrentTrainerWrapper(nn.Module):
+    def __init__(
+        self,
+        transformer: BlockRecurrentTransformer
+    ):
+        super().__init__()
+        self.transformer = transformer
+        self.seq_len = transformer.max_seq_len
+
+    @eval_decorator
+    @torch.no_grad()
+    def generate(
+        self,
+        prime
+    ):
+        raise NotImplementedError
+
+    def forward(self, x):
+        total_seq_len, seq_len = x.shape[1], self.seq_len
+
+        assert divisible_by(total_seq_len - 1, seq_len), f'length of sequence ({total_seq_len}) must be equal to a multiple of {seq_len} + 1 (one extra token) during training'
+        segments = total_seq_len // seq_len
+
+        total_loss = 0.
+
+        memories = []
+        states = []
+
+        for ind in range(segments):
+            start = ind * seq_len
+            end = start + seq_len + 1
+
+            loss, memories, states = self.transformer(
+                x[:, start:end],
+                xl_memories = memories,
+                states = states,
+                return_loss = True
+            )
+
+            total_loss = total_loss + (loss / segments)
+
+        return total_loss
