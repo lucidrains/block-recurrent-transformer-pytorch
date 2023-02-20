@@ -49,8 +49,7 @@ acc_print = accelerator.print
 model = BlockRecurrentTransformer(
     num_tokens = 256,
     dim = 512,
-    depth = 8,
-    recurrent_layers = tuple()
+    depth = 8
 )
 
 train_wrapper = RecurrentTrainerWrapper(model)
@@ -118,6 +117,7 @@ for i in tqdm.tqdm(range(NUM_BATCHES), mininterval=10.0, desc="training"):
         prime = decode_tokens(inp)
         acc_print(f"%s \n\n %s", (prime, "*" * 100))
 
-        sample = model.generate(inp[None, :model.max_seq_len])
+        sample = model.generate(inp[None, ...])
+        print(sample.shape)
         output_str = decode_tokens(sample[0])
         acc_print(output_str, "\n")

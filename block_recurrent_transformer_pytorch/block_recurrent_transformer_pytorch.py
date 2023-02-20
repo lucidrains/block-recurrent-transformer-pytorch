@@ -418,18 +418,23 @@ class BlockRecurrentTransformer(nn.Module):
         xl_memories: List[torch.Tensor] = [],
         states: List[torch.Tensor] = [],
         temperature = 1.,
-        filter_thres = 0.9
+        filter_thres = 0.9,
+        return_memories_and_states = False
     ):
-        length = default(length, self.max_seq_len)
-        assert 0 < length <= self.max_seq_len
+        length = default(length, self.max_seq_len + 1)
+        start_len = prime.shape[-1]
 
-        orig_len = prime.shape[-1]
+        assert length <= (self.max_seq_len + 1)
+
         output = prime
 
-        for _ in range(length):
+        memories = []
+        states = []
 
-            logits, *_ = self.forward(
-                output[:, -self.max_seq_len:],
+        for ind in range(length - start_len):
+
+            logits, next_memories, next_states = self.forward(
+                output,
                 xl_memories = xl_memories,
                 states = states
             )
@@ -442,7 +447,13 @@ class BlockRecurrentTransformer(nn.Module):
 
             output = torch.cat((output, sampled), dim = -1)
 
-        output = output[:, orig_len:]
+            if divisible_by(output.shape[-1] - 1, self.max_seq_len): # on the sampling of the last token in the current window, set new memories and states
+                memories = next_memories
+                states = next_states
+
+        if return_memories_and_states:
+            return output, memories, states
+
         return output
 
     def forward(
