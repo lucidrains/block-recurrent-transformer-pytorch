@@ -453,6 +453,8 @@ class BlockRecurrentTransformer(nn.Module):
                 memories = next_memories
                 states = next_states
 
+        output = output[:, start_len:]
+
         if return_memories_and_states:
             return output, memories, states
 
@@ -585,9 +587,42 @@ class RecurrentTrainerWrapper(nn.Module):
     @torch.no_grad()
     def generate(
         self,
-        prime
+        prime,
+        length,
+        **kwargs
     ):
-        raise NotImplementedError
+        start_len = prime.shape[-1]
+        assert start_len < length
+
+        output = prime
+        current_len = start_len
+
+        memories = []
+        states = []
+
+        while output.shape[-1] < length:
+
+            if (length - output.shape[-1]) <= self.seq_len:
+                next_length = length % self.seq_len
+            else:
+                next_length = self.seq_len + 1
+
+            if next_length == 0:
+                break
+
+            segment_output, memories, states = self.transformer.generate(
+                output[:, -current_len:],
+                length = next_length,
+                xl_memories = memories,
+                states = states,
+                return_memories_and_states = True,
+                **kwargs
+            )
+
+            output = torch.cat((output, segment_output), dim = -1)
+            current_len = 1
+
+        return output[:, start_len:]
 
     def forward(self, x):
         total_seq_len, seq_len = x.shape[1], self.seq_len

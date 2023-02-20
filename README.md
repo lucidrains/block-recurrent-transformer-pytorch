@@ -1,6 +1,6 @@
 <img src="./block-recurrent-transformer.png" width="450px"></img>
 
-## Block Recurrent Transformer - Pytorch (wip)
+## Block Recurrent Transformer - Pytorch
 
 Implementation of <a href="https://arxiv.org/abs/2203.07852">Block Recurrent Transformer</a> - Pytorch. The highlight of the paper is its reported ability to remember something up to 60k tokens ago.
 
@@ -37,14 +37,22 @@ out, mems2, states2 = model(seq, xl_memories = mems1, states = states1)
 out, mems3, states3 = model(seq, xl_memories = mems2, states = states2)
 ```
 
+## Test on Enwik8
+
+First `pip install -r requirements.txt`, then
+
+```bash
+$ python train.py
+```
+
 ## Todo
 
 - [x] use dynamic positional bias
 - [x] add enhanced recurrence
 - [x] setup local attention blocks, as in the paper
 - [x] wrapper transformer class for training
+- [x] take care of generation with recurrence in `RecurrentTrainWrapper`
 
-- [ ] take care of generation with recurrence in `RecurrentTrainWrapper`
 - [ ] think about giving memories information to the dynamic pos bias mlp
 - [ ] run a few experiments of fixed gating in regular transformers
 - [ ] add structured dropout to memories and states

@@ -20,7 +20,7 @@ LEARNING_RATE = 1e-4
 VALIDATE_EVERY = 100
 PRIME_LENGTH = 128
 GENERATE_EVERY = 250
-GENERATE_LENGTH = 512
+GENERATE_LENGTH = 1536
 SEQ_LEN = 2048
 
 # helpers
@@ -117,7 +117,6 @@ for i in tqdm.tqdm(range(NUM_BATCHES), mininterval=10.0, desc="training"):
         prime = decode_tokens(inp)
         acc_print(f"%s \n\n %s", (prime, "*" * 100))
 
-        sample = model.generate(inp[None, ...])
-        print(sample.shape)
+        sample = train_wrapper.generate(inp[None, ...], length = GENERATE_LENGTH)
         output_str = decode_tokens(sample[0])
         acc_print(output_str, "\n")
