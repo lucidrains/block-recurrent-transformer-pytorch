@@ -415,6 +415,8 @@ class BlockRecurrentTransformer(nn.Module):
         self,
         length,
         prime,
+        xl_memories: List[torch.Tensor] = [],
+        states: List[torch.Tensor] = [],
         temperature = 1.,
         filter_thres = 0.9
     ):
@@ -422,7 +424,13 @@ class BlockRecurrentTransformer(nn.Module):
         output = prime
 
         for _ in range(length):
-            logits, *_ = self.forward(output[:, -self.max_seq_len:])
+
+            logits, *_ = self.forward(
+                output[:, -self.max_seq_len:],
+                xl_memories = xl_memories,
+                states = states
+            )
+
             logits = logits[:, -1]
 
             filtered_logits = top_k(logits, thres = filter_thres)
