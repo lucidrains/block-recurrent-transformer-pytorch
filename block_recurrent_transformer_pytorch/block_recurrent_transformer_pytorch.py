@@ -421,6 +421,8 @@ class BlockRecurrentTransformer(nn.Module):
         filter_thres = 0.9
     ):
         length = default(length, self.max_seq_len)
+        assert 0 < length <= self.max_seq_len
+
         orig_len = prime.shape[-1]
         output = prime
 
