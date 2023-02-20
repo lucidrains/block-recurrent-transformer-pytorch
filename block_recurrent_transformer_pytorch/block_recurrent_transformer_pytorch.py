@@ -591,6 +591,7 @@ class RecurrentTrainerWrapper(nn.Module):
         length,
         **kwargs
     ):
+        seq_len = self.seq_len
         start_len = prime.shape[-1]
         assert start_len < length
 
@@ -600,15 +601,22 @@ class RecurrentTrainerWrapper(nn.Module):
         memories = []
         states = []
 
-        while output.shape[-1] < length:
+        # determine lengths
 
-            if (length - output.shape[-1]) <= self.seq_len:
-                next_length = length % self.seq_len
-            else:
-                next_length = self.seq_len + 1
+        has_remainder = not divisible_by(length, seq_len)
+        remainder_amount = length % seq_len
+        total_segments = math.ceil(length / seq_len)
 
-            if next_length == 0:
-                break
+        if not has_remainder:
+            lengths = (*((seq_len + 1,) * (total_segments - 1)), seq_len)
+        elif remainder_amount == 1:
+            lengths = (seq_len + 1,) * (total_segments - 1)
+        else:
+            lengths = (*((seq_len + 1,) * (total_segments - 1)), remainder_amount)
+
+        # loop through lengths
+
+        for next_length in lengths:
 
             segment_output, memories, states = self.transformer.generate(
                 output[:, -current_len:],
