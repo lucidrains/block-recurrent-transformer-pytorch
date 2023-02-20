@@ -47,7 +47,6 @@ out, mems3, states3 = model(seq, xl_memories = mems2, states = states2)
 - [ ] revisit <a href="https://github.com/lucidrains/memformer">memformer</a>
 - [ ] test full system on enwik8 locally and ablate states and memories and see effects first  hand
 
-
 ## Citations
 
 ```bibtex

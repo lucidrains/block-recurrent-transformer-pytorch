@@ -195,6 +195,7 @@ class AttentionBlock(nn.Module):
         x,
         rel_pos_bias = None,
         attn_mask = None,
+        return_memories_and_states = None,
         xl_memories: Optional[torch.Tensor] = None,
         states: Optional[torch.Tensor] = None
     ):
@@ -222,7 +223,10 @@ class AttentionBlock(nn.Module):
 
         # save the last key / values as memories for recurrence
 
-        memories = torch.stack((bk[:, -1], bv[:, -1]))
+        memories = None
+
+        if return_memories_and_states:
+            memories = torch.stack((bk[:, -1], bv[:, -1]))
 
         if exists(xl_memories):
             # if past memories are passed in, concat as the first bucket
@@ -278,7 +282,7 @@ class AttentionBlock(nn.Module):
 
             # get queries for cross attention, which they do not share, although they share key / values. another intriguing detail
 
-            q_to_state = self.q_to_state(x)
+            q_to_state = self.q_to_state(x[:, :seq_len])
             q_from_state = self.q_from_state(states)
 
             q_to_state, q_from_state = map(lambda t: rearrange(t, '... n (h d) -> ... h n d', h = self.heads), (q_to_state, q_from_state))
@@ -298,27 +302,28 @@ class AttentionBlock(nn.Module):
 
             out = torch.cat((out, to_state_out), dim = -1)
 
-            # states must also undergo self attention
+            if return_memories_and_states:
+                # states must also undergo self attention
 
-            if q_from_state.ndim == 3:
-                q_from_state = repeat(q_from_state, '... -> b ...', b = batch)
+                if q_from_state.ndim == 3:
+                    q_from_state = repeat(q_from_state, '... -> b ...', b = batch)
 
-            state_out = self.state_self_attn(state_q, state_k, state_v)
+                state_out = self.state_self_attn(state_q, state_k, state_v)
 
-            from_state_out = self.from_state_cross_attn(q_from_state, memories[0], memories[1])
+                from_state_out = self.from_state_cross_attn(q_from_state, memories[0], memories[1])
 
-            state_out = torch.cat((state_out, from_state_out), dim = -1)
-            state_out = rearrange(state_out, 'b h n d -> b n (h d)')
+                state_out = torch.cat((state_out, from_state_out), dim = -1)
+                state_out = rearrange(state_out, 'b h n d -> b n (h d)')
 
-            state_out = self.to_state_out(state_out)
+                state_out = self.to_state_out(state_out)
 
-            # use the best performing configuration
-            # fixed simple gate - nothing more than a learned EMA with some resemblance to highway networks
+                # use the best performing configuration
+                # fixed simple gate - nothing more than a learned EMA with some resemblance to highway networks
 
-            z = self.state_out_to_gate(state_out)
-            learned_ema_decay = self.learned_ema_beta.sigmoid()
+                z = self.state_out_to_gate(state_out)
+                learned_ema_decay = self.learned_ema_beta.sigmoid()
 
-            new_states = learned_ema_decay * z + (1 - learned_ema_decay) * orig_states
+                new_states = learned_ema_decay * z + (1 - learned_ema_decay) * orig_states
 
         return self.to_out(out), memories, new_states
 
@@ -434,7 +439,7 @@ class BlockRecurrentTransformer(nn.Module):
         return_loss = False,
         xl_memories: List[torch.Tensor] = [],
         states: List[torch.Tensor] = [],
-
+        return_memories_and_states = None  # can force to either return memory + state or not. by default will only return when number of tokens == max_seq_len
     ):
         device = x.device
 
@@ -480,6 +485,10 @@ class BlockRecurrentTransformer(nn.Module):
         next_xl_memories = []
         next_states = []
 
+        return_memories_and_states = default(return_memories_and_states, self.max_seq_len == x.shape[-2])
+
+        # go through layers
+
         for ind, (attn, ff) in enumerate(self.layers):
 
             # determine if the layer requires transformer xl memories
@@ -493,7 +502,8 @@ class BlockRecurrentTransformer(nn.Module):
 
             attn_kwargs = dict(
                 rel_pos_bias = pos_bias,
-                attn_mask = attn_mask
+                attn_mask = attn_mask,
+                return_memories_and_states = return_memories_and_states
             )
 
             if is_xl_layer:
@@ -507,15 +517,16 @@ class BlockRecurrentTransformer(nn.Module):
             residual = x
             attn_branch_out, layer_xl_memories, layer_next_states = attn(x, **attn_kwargs)
 
-            # save states if needed
+            if return_memories_and_states:
+                # save states if needed
 
-            if exists(layer_next_states):
-                next_states.append(layer_next_states.detach())
+                if exists(layer_next_states):
+                    next_states.append(layer_next_states.detach())
 
-            # save current xl memories if needed
+                # save current xl memories if needed
 
-            if is_xl_layer:
-                next_xl_memories.append(layer_xl_memories.detach())
+                if is_xl_layer:
+                    next_xl_memories.append(layer_xl_memories.detach())
 
             x = attn_branch_out + residual
 
