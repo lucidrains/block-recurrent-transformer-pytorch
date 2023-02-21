@@ -49,7 +49,15 @@ acc_print = accelerator.print
 model = BlockRecurrentTransformer(
     num_tokens = 256,
     dim = 512,
-    depth = 8
+    depth = 6,
+    dim_head = 64,
+    heads = 8,
+    max_seq_len = 1024,
+    block_width = 512,
+    xl_memories_layers = (5, 6),
+    num_state_vectors = 512,
+    recurrent_layers = (4,),
+    enhanced_recurrence = True
 )
 
 train_wrapper = RecurrentTrainerWrapper(
