@@ -20,7 +20,7 @@ LEARNING_RATE = 1e-4
 VALIDATE_EVERY = 100
 PRIME_LENGTH = 128
 GENERATE_EVERY = 250
-GENERATE_LENGTH = 1536
+GENERATE_LENGTH = 2048
 SEQ_LEN = 2048
 
 # helpers
@@ -52,7 +52,11 @@ model = BlockRecurrentTransformer(
     depth = 8
 )
 
-train_wrapper = RecurrentTrainerWrapper(model)
+train_wrapper = RecurrentTrainerWrapper(
+    model,
+    xl_memories_dropout = 0.1,
+    state_dropout = 0.1,
+)
 
 model.to(device)
 

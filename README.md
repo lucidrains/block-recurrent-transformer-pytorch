@@ -52,10 +52,10 @@ $ python train.py
 - [x] setup local attention blocks, as in the paper
 - [x] wrapper transformer class for training
 - [x] take care of generation with recurrence in `RecurrentTrainWrapper`
+- [x] add ability to dropout to entire memories and states during each segment step during trainng
 
 - [ ] think about giving memories information to the dynamic pos bias mlp
 - [ ] run a few experiments of fixed gating in regular transformers
-- [ ] add structured dropout to memories and states
 - [ ] make sure attention class can support batch-less dimensions (conditionals on einsum equations) and simplify some logic - allow for single head key / values too
 - [ ] revisit <a href="https://github.com/lucidrains/memformer">memformer</a>
 - [ ] test full system on enwik8 locally and ablate states and memories and see effects first  hand

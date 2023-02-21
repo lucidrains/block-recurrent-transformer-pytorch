@@ -1,4 +1,7 @@
 import math
+from random import random
+from functools import wraps
+
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum
@@ -577,11 +580,16 @@ class BlockRecurrentTransformer(nn.Module):
 class RecurrentTrainerWrapper(nn.Module):
     def __init__(
         self,
-        transformer: BlockRecurrentTransformer
+        transformer: BlockRecurrentTransformer,
+        xl_memories_dropout = 0.,
+        state_dropout = 0.
     ):
         super().__init__()
         self.transformer = transformer
         self.seq_len = transformer.max_seq_len
+
+        self.xl_memories_dropout = xl_memories_dropout
+        self.state_dropout = state_dropout
 
     @eval_decorator
     @torch.no_grad()
@@ -646,6 +654,12 @@ class RecurrentTrainerWrapper(nn.Module):
         for ind in range(segments):
             start = ind * seq_len
             end = start + seq_len + 1
+
+            if self.training and random() < self.xl_memories_dropout:
+                memories.clear()
+
+            if self.training and random() < self.state_dropout:
+                states.clear()
 
             loss, memories, states = self.transformer(
                 x[:, start:end],
