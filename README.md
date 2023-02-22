@@ -96,4 +96,18 @@ $ python train.py
 }
 ```
 
+```bibtex
+@inproceedings{rae-razavi-2020-transformers,
+    title   = "Do Transformers Need Deep Long-Range Memory?",
+    author  = "Rae, Jack  and Razavi, Ali",
+    booktitle = "Proceedings of the 58th Annual Meeting of the Association for Computational Linguistics",
+    month   = jul,
+    year    = "2020",
+    address = "Online",
+    publisher = "Association for Computational Linguistics",
+    url     = "https://www.aclweb.org/anthology/2020.acl-main.672"
+}
+```
+
+
 *Memory is Attention through Time* - Alex Graves

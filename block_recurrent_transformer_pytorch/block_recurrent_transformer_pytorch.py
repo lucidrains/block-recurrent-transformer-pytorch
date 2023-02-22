@@ -93,18 +93,15 @@ class Attention(nn.Module):
         self,
         dim_head,
         causal = True,
-        cosine_sim = False,
         qk_rmsnorm = False,
-        cosine_sim_scale = 8,
+        qk_rmsnorm_scale = 8,
         single_head_kv = True
     ):
         super().__init__()
         self.causal = causal
 
-        assert not (cosine_sim and qk_rmsnorm)
-        self.cosine_sim = cosine_sim
         self.qk_rmsnorm = qk_rmsnorm
-        self.cosine_sim_scale = cosine_sim_scale
+        self.qk_rmsnorm_scale = qk_rmsnorm_scale
 
         self.single_head_kv = single_head_kv
 
@@ -116,9 +113,9 @@ class Attention(nn.Module):
 
         scale = q.shape[-1] ** -0.5
 
-        if self.cosine_sim or self.qk_rmsnorm:
+        if self.qk_rmsnorm:
             q, k = map(l2norm, (q, k))
-            scale = self.cosine_sim_scale
+            scale = self.qk_rmsnorm_scale
 
         if self.qk_rmsnorm:
             q = q * self.q_scale
@@ -155,9 +152,8 @@ class AttentionBlock(nn.Module):
         causal = True,
         dim_head = 64,
         heads = 8,
-        cosine_sim = False,
         qk_rmsnorm = False,
-        cosine_sim_scale = 8,
+        qk_rmsnorm_scale = 8,
         num_state_vectors = 0,
         single_head_kv = True
     ):
@@ -172,7 +168,7 @@ class AttentionBlock(nn.Module):
         self.single_head_kv = single_head_kv
         self.to_kv = nn.Linear(dim, (inner_dim if not single_head_kv else dim_head) * 2, bias = False)
 
-        self.attn = Attention(dim_head, causal = causal, cosine_sim = cosine_sim, qk_rmsnorm = qk_rmsnorm, cosine_sim_scale = cosine_sim_scale, single_head_kv = single_head_kv)
+        self.attn = Attention(dim_head, causal = causal, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, single_head_kv = single_head_kv)
 
         self.block_width = block_width
         self.is_recurrent_layer = num_state_vectors > 0
@@ -193,10 +189,10 @@ class AttentionBlock(nn.Module):
 
             self.to_state_out = nn.Linear(inner_dim * 2, dim, bias = False)
 
-            self.to_state_cross_attn = Attention(dim_head, causal = False, cosine_sim = cosine_sim, qk_rmsnorm = qk_rmsnorm, cosine_sim_scale = cosine_sim_scale, single_head_kv = single_head_kv)
+            self.to_state_cross_attn = Attention(dim_head, causal = False, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, single_head_kv = single_head_kv)
 
-            self.state_self_attn = Attention(dim_head, causal = False, cosine_sim = cosine_sim, qk_rmsnorm = qk_rmsnorm, cosine_sim_scale = cosine_sim_scale, single_head_kv = single_head_kv)
-            self.from_state_cross_attn = Attention(dim_head, causal = False, cosine_sim = cosine_sim, qk_rmsnorm = qk_rmsnorm, cosine_sim_scale = cosine_sim_scale, single_head_kv = single_head_kv)
+            self.state_self_attn = Attention(dim_head, causal = False, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, single_head_kv = single_head_kv)
+            self.from_state_cross_attn = Attention(dim_head, causal = False, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, single_head_kv = single_head_kv)
 
             # gating related parameters - using the fixed simple config
 
@@ -360,10 +356,8 @@ class BlockRecurrentTransformer(nn.Module):
         depth,
         dim_head = 64,
         heads = 8,
-        cosine_sim = False,
-        qk_rmsnorm = True,
-        cosine_sim_scale = 8,
         single_head_kv = True,
+        all_layers_qk_rmsnorm = False,
         ff_mult = 4,
         max_seq_len = 1024,
         block_width = 512,
@@ -401,7 +395,16 @@ class BlockRecurrentTransformer(nn.Module):
 
         for layer in range(1, depth + 1):
             is_recurrent_layer = layer in self.recurrent_layers
+            is_xl_layer = layer in self.xl_memories_layers
+
             layer_num_state_vectors = num_state_vectors if is_recurrent_layer else 0
+
+            # only layers with xl memories
+            # or has recurrence in horizontal direction
+            # use qk rmsnorm (in paper, they use cosine sim attention, but i think qk rmsnorm is more proven given Vit 22B paper)
+            # one can also override to use all qk rmsnorm by setting all_layers_qk_rmsnorm = True
+
+            qk_rmsnorm = all_layers_qk_rmsnorm or is_recurrent_layer or is_xl_layer
 
             self.layers.append(nn.ModuleList([
                 AttentionBlock(
@@ -410,10 +413,8 @@ class BlockRecurrentTransformer(nn.Module):
                     block_width = block_width,
                     dim_head = dim_head,
                     heads = heads,
-                    cosine_sim = cosine_sim,
-                    qk_rmsnorm = qk_rmsnorm,
-                    cosine_sim_scale = cosine_sim_scale,
                     single_head_kv = single_head_kv,
+                    qk_rmsnorm = qk_rmsnorm,
                     num_state_vectors = layer_num_state_vectors
                 ),
                 FeedForward(dim, mult = ff_mult)
