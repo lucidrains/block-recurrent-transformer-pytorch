@@ -86,4 +86,14 @@ $ python train.py
 }
 ```
 
+```bibtex
+@article{Shazeer2019FastTD,
+    title   = {Fast Transformer Decoding: One Write-Head is All You Need},
+    author  = {Noam M. Shazeer},
+    journal = {ArXiv},
+    year    = {2019},
+    volume  = {abs/1911.02150}
+}
+```
+
 *Memory is Attention through Time* - Alex Graves

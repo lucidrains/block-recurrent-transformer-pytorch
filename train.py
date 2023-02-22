@@ -57,7 +57,8 @@ model = BlockRecurrentTransformer(
     xl_memories_layers = (5, 6),
     num_state_vectors = 512,
     recurrent_layers = (4,),
-    enhanced_recurrence = True
+    enhanced_recurrence = True,
+    single_head_kv = True
 )
 
 train_wrapper = RecurrentTrainerWrapper(

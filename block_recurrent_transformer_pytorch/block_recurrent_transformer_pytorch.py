@@ -1,6 +1,6 @@
 import math
 from random import random
-from functools import wraps
+from functools import wraps, partial
 
 import torch
 import torch.nn.functional as F
@@ -95,7 +95,8 @@ class Attention(nn.Module):
         causal = True,
         cosine_sim = False,
         qk_rmsnorm = False,
-        cosine_sim_scale = 8
+        cosine_sim_scale = 8,
+        single_head_kv = True
     ):
         super().__init__()
         self.causal = causal
@@ -104,6 +105,8 @@ class Attention(nn.Module):
         self.cosine_sim = cosine_sim
         self.qk_rmsnorm = qk_rmsnorm
         self.cosine_sim_scale = cosine_sim_scale
+
+        self.single_head_kv = single_head_kv
 
         if qk_rmsnorm:
             self.q_scale = nn.Parameter(torch.ones(dim_head))
@@ -121,7 +124,7 @@ class Attention(nn.Module):
             q = q * self.q_scale
             k = k * self.k_scale
 
-        kv_einsum = '... j d' if k.ndim == 3 else '... h j d'
+        kv_einsum = '... j d' if self.single_head_kv else '... h j d'
 
         sim = einsum(f'... h i d, {kv_einsum} -> ... h i j', q, k) * scale
 
@@ -156,6 +159,7 @@ class AttentionBlock(nn.Module):
         qk_rmsnorm = False,
         cosine_sim_scale = 8,
         num_state_vectors = 0,
+        single_head_kv = True
     ):
         super().__init__()
         inner_dim = dim_head * heads
@@ -163,8 +167,12 @@ class AttentionBlock(nn.Module):
 
         self.norm = LayerNorm(dim)
 
-        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
-        self.attn = Attention(dim_head, causal = causal, cosine_sim = cosine_sim, qk_rmsnorm = qk_rmsnorm, cosine_sim_scale = cosine_sim_scale)
+        self.to_q = nn.Linear(dim, inner_dim, bias = False)
+
+        self.single_head_kv = single_head_kv
+        self.to_kv = nn.Linear(dim, (inner_dim if not single_head_kv else dim_head) * 2, bias = False)
+
+        self.attn = Attention(dim_head, causal = causal, cosine_sim = cosine_sim, qk_rmsnorm = qk_rmsnorm, cosine_sim_scale = cosine_sim_scale, single_head_kv = single_head_kv)
 
         self.block_width = block_width
         self.is_recurrent_layer = num_state_vectors > 0
@@ -177,16 +185,18 @@ class AttentionBlock(nn.Module):
             self.q_to_state = nn.Linear(dim, inner_dim, bias = False)
             self.q_from_state = nn.Linear(dim, inner_dim, bias = False)
 
-            self.state_to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
+            self.state_to_q = nn.Linear(dim, inner_dim, bias = False)
+            self.state_to_kv = nn.Linear(dim, (inner_dim if not single_head_kv else dim_head) * 2, bias = False)
+
             self.init_state = nn.Parameter(torch.randn(num_state_vectors, dim))
             self.state_pos_ids = nn.Parameter(torch.randn(num_state_vectors, dim))
 
             self.to_state_out = nn.Linear(inner_dim * 2, dim, bias = False)
 
-            self.to_state_cross_attn = Attention(dim_head, causal = False, cosine_sim = cosine_sim, qk_rmsnorm = qk_rmsnorm, cosine_sim_scale = cosine_sim_scale)
+            self.to_state_cross_attn = Attention(dim_head, causal = False, cosine_sim = cosine_sim, qk_rmsnorm = qk_rmsnorm, cosine_sim_scale = cosine_sim_scale, single_head_kv = single_head_kv)
 
-            self.state_self_attn = Attention(dim_head, causal = False, cosine_sim = cosine_sim, qk_rmsnorm = qk_rmsnorm, cosine_sim_scale = cosine_sim_scale)
-            self.from_state_cross_attn = Attention(dim_head, causal = False, cosine_sim = cosine_sim, qk_rmsnorm = qk_rmsnorm, cosine_sim_scale = cosine_sim_scale)
+            self.state_self_attn = Attention(dim_head, causal = False, cosine_sim = cosine_sim, qk_rmsnorm = qk_rmsnorm, cosine_sim_scale = cosine_sim_scale, single_head_kv = single_head_kv)
+            self.from_state_cross_attn = Attention(dim_head, causal = False, cosine_sim = cosine_sim, qk_rmsnorm = qk_rmsnorm, cosine_sim_scale = cosine_sim_scale, single_head_kv = single_head_kv)
 
             # gating related parameters - using the fixed simple config
 
@@ -217,12 +227,17 @@ class AttentionBlock(nn.Module):
 
         # queries, keys, values and split out heads
 
-        q, k, v = self.to_qkv(x).chunk(3, dim = -1)
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), (q, k, v))
+        q, k, v = (self.to_q(x), *self.to_kv(x).chunk(2, dim = -1))
+
+        split_head = partial(rearrange, pattern = 'b n (h d) -> b h n d', h = self.heads)
+        q = split_head(q)
+
+        if not self.single_head_kv:
+            k, v = map(split_head, (k, v))
 
         # bucket the queries, keys, values by block width
 
-        bq, bk, bv = map(lambda t: rearrange(t, 'b h (w n) d -> b w h n d', n = width), (q, k, v))
+        bq, bk, bv = map(lambda t: rearrange(t, 'b ... (w n) d -> b w ... n d', n = width), (q, k, v))
 
         # save the last key / values as memories for recurrence
 
@@ -234,7 +249,7 @@ class AttentionBlock(nn.Module):
         if exists(xl_memories):
             # if past memories are passed in, concat as the first bucket
             past_k, past_v = xl_memories
-            past_k, past_v = map(lambda t: rearrange(t, 'b h n d -> b 1 h n d'), (past_k, past_v))
+            past_k, past_v = map(lambda t: rearrange(t, 'b ... n d -> b 1 ... n d'), (past_k, past_v))
             bk = torch.cat((past_k, bk), dim = 1)
             bv = torch.cat((past_v, bv), dim = 1)
         else:
@@ -292,8 +307,11 @@ class AttentionBlock(nn.Module):
 
             # self attention qkv for states
 
-            states = self.state_to_qkv(self.init_state).chunk(3, dim = -1)
-            state_q, state_k, state_v = map(lambda t: repeat(t, 'n (h d) -> b h n d', h = self.heads, b = batch), states)
+            state_q, state_k, state_v = (self.state_to_q(self.init_state), *self.state_to_kv(self.init_state).chunk(2, dim = -1))
+            state_q = repeat(state_q, 'n (h d) -> b h n d', h = self.heads, b = batch)
+
+            if not self.single_head_kv:
+                state_k, state_v = map(lambda t: repeat(t, 'n (h d) -> b h n d', h = self.heads, b = batch), (state_k, state_v))
 
             # cross attend to the past states key values
 
@@ -345,17 +363,19 @@ class BlockRecurrentTransformer(nn.Module):
         cosine_sim = False,
         qk_rmsnorm = True,
         cosine_sim_scale = 8,
+        single_head_kv = True,
         ff_mult = 4,
-        ignore_index = -100,
         max_seq_len = 1024,
         block_width = 512,
         xl_memories_layers: Optional[Tuple[int, ...]] = None,
         recurrent_layers: Optional[Tuple[int, ...]] = None,
-        num_state_vectors = 512,
+        num_state_vectors = None,
         dynamic_pos_bias_dim = None,
-        enhanced_recurrence = False
+        enhanced_recurrence = False,
+        ignore_index = -100
     ):
         super().__init__()
+        num_state_vectors = default(num_state_vectors, block_width)
         xl_memories_layers = default(xl_memories_layers, tuple(range(1, depth + 1)))
         self.xl_memories_layers = set(xl_memories_layers)
 
@@ -393,6 +413,7 @@ class BlockRecurrentTransformer(nn.Module):
                     cosine_sim = cosine_sim,
                     qk_rmsnorm = qk_rmsnorm,
                     cosine_sim_scale = cosine_sim_scale,
+                    single_head_kv = single_head_kv,
                     num_state_vectors = layer_num_state_vectors
                 ),
                 FeedForward(dim, mult = ff_mult)
