@@ -64,6 +64,7 @@ $ python train.py
 
 - [ ] run a few experiments of fixed gating in regular transformers
 - [ ] revisit <a href="https://github.com/lucidrains/memformer">memformer</a>
+- [ ] integrate <a href="https://github.com/hazyresearch/flash-attention">flash attention</a>
 
 ## Citations
 
