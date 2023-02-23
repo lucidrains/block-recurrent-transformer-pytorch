@@ -61,8 +61,8 @@ $ python train.py
 - [x] add ability to dropout to entire memories and states during each segment step during trainng
 - [x] test full system on enwik8 locally and ablate states and memories and see effects first  hand
 - [x] make sure attention allow for single head key / values too
+- [x] run a few experiments of fixed gating in regular transformers - does not work
 
-- [ ] run a few experiments of fixed gating in regular transformers
 - [ ] revisit <a href="https://github.com/lucidrains/memformer">memformer</a>
 - [ ] integrate <a href="https://github.com/hazyresearch/flash-attention">flash attention</a>
 
