@@ -662,7 +662,7 @@ class RecurrentTrainerWrapper(nn.Module):
 
         return output[:, start_len:]
 
-    def forward(self, x):
+    def forward(self, x, return_memories_and_states = False):
         total_seq_len, seq_len = x.shape[1], self.seq_len
 
         assert divisible_by(total_seq_len - 1, seq_len), f'length of sequence ({total_seq_len}) must be equal to a multiple of {seq_len} + 1 (one extra token) during training'
@@ -691,5 +691,8 @@ class RecurrentTrainerWrapper(nn.Module):
             )
 
             total_loss = total_loss + (loss / segments)
+
+        if return_memories_and_states:
+            return total_loss, memories, states
 
         return total_loss
