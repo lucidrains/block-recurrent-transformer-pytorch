@@ -13,7 +13,7 @@ This design is SOTA for recurrent transformers line of research, afaict.
 ## Install
 
 ```bash
-$ pip install block-recurrent-transformer
+$ pip install block-recurrent-transformer-pytorch
 ```
 
 ## Usage
