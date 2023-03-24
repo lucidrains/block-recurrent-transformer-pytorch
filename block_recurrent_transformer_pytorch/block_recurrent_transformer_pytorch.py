@@ -362,7 +362,7 @@ class Attention(nn.Module):
 
         if exists(rotary_pos_emb):
             q = apply_rotary_pos_emb(q, rotary_pos_emb, xpos_scale)
-            k = apply_rotary_pos_emb(k, rotary_pos_emb, xpos_scale)
+            k = apply_rotary_pos_emb(k, rotary_pos_emb, xpos_scale ** -1)
 
         # attention
 
