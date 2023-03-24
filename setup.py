@@ -20,6 +20,7 @@ setup(
   install_requires=[
     'beartype',
     'einops>=0.4',
+    'memorizing-transformers-pytorch>=0.4.0',
     'torch>=1.6',
   ],
   classifiers=[
