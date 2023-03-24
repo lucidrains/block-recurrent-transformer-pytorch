@@ -6,6 +6,8 @@ Implementation of <a href="https://arxiv.org/abs/2203.07852">Block Recurrent Tra
 
 This design is SOTA for recurrent transformers line of research, afaict.
 
+It will also include <a href="https://arxiv.org/abs/2205.14135">flash attention</a> as well as <a href="https://arxiv.org/abs/2203.08913">memorizing transformers</a>
+
 ## Appreciation
 
 - <a href="https://stability.ai/">Stability.ai</a> for the generous sponsorship to work and open source cutting edge artificial intelligence research
