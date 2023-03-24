@@ -70,6 +70,66 @@ def top_k(logits, thres = 0.9):
     probs.scatter_(1, ind, val)
     return probs
 
+# rotary positional embedding w/ xpos
+# https://arxiv.org/abs/2104.09864
+# https://arxiv.org/abs/2212.10554v1
+
+class RotaryEmbedding(nn.Module):
+    def __init__(
+        self,
+        dim,
+        scale_base = 512,
+        use_xpos = True,
+        theta = 10000
+    ):
+        super().__init__()
+        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq)
+
+        self.use_xpos = use_xpos
+        self.scale_base = scale_base
+        scale = (torch.arange(0, dim, 2) + 0.4 * dim) / (1.4 * dim)
+        self.register_buffer('scale', scale)
+
+    @property
+    def device(self):
+        return next(self.buffers()).device
+
+    def forward(self, seq_len):
+        device = self.device
+        t = torch.arange(seq_len, device = device).type_as(self.inv_freq)
+        freqs = torch.einsum('i , j -> i j', t, self.inv_freq)
+        freqs = torch.cat((freqs, freqs), dim = -1)
+
+        if not self.use_xpos:
+            return freqs, torch.ones(1, device = device)
+
+        power = (t - (seq_len // 2)) / self.scale_base
+        scale = self.scale ** rearrange(power, 'n -> n 1')
+        scale = torch.cat((scale, scale), dim = -1)
+
+        return freqs, scale
+
+def rotate_half(x):
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb(t, pos, scale = 1.):
+    scale = default(scale, 1.)
+
+    seq_len = t.shape[-2]
+
+    assert pos.shape[-2] >= seq_len
+
+    pos = pos[-seq_len:]
+
+    if isinstance(scale, torch.Tensor):
+        assert scale.shape[-2] >= seq_len
+        scale = scale[-seq_len:]
+
+    return (t * pos.cos() * scale) + (rotate_half(t) * pos.sin() * scale)
+
 # geglu feedforward
 
 class GEGLU(nn.Module):
@@ -109,7 +169,13 @@ class Attention(nn.Module):
             self.q_scale = nn.Parameter(torch.ones(dim_head))
             self.k_scale = nn.Parameter(torch.ones(dim_head))
 
-    def forward(self, q, k, v, mask = None, attn_bias = None):
+    def forward(
+        self,
+        q, k, v,
+        mask = None,
+        rotary_pos_emb = None,
+        xpos_scale = None
+    ):
 
         scale = q.shape[-1] ** -0.5
 
@@ -121,12 +187,18 @@ class Attention(nn.Module):
             q = q * self.q_scale
             k = k * self.k_scale
 
+        # rotary positional embedding with xpos for length extrapolation
+
+        if exists(rotary_pos_emb):
+            q = apply_rotary_pos_emb(q, rotary_pos_emb, xpos_scale)
+            k = apply_rotary_pos_emb(k, rotary_pos_emb, xpos_scale)
+
+        # similarity
+
         kv_einsum = '... j d' if self.single_head_kv else '... h j d'
 
         sim = einsum(f'... h i d, {kv_einsum} -> ... h i j', q, k) * scale
 
-        if exists(attn_bias):
-            sim = sim + attn_bias
 
         max_neg_value = -torch.finfo(sim.dtype).max
 
@@ -202,7 +274,8 @@ class AttentionBlock(nn.Module):
     def forward(
         self,
         x,
-        rel_pos_bias = None,
+        rotary_pos_emb = None,
+        xpos_scale = None,
         attn_mask = None,
         return_memories_and_states = None,
         xl_memories: Optional[torch.Tensor] = None,
@@ -265,7 +338,12 @@ class AttentionBlock(nn.Module):
 
         # attention, but of course
 
-        out = self.attn(bq, bk, bv, attn_bias = rel_pos_bias, mask = attn_mask)
+        out = self.attn(
+            bq, bk, bv,
+            rotary_pos_emb = rotary_pos_emb,
+            xpos_scale = xpos_scale,
+            mask = attn_mask
+        )
 
         # merge the heads as well as the buckets
 
@@ -364,9 +442,9 @@ class BlockRecurrentTransformer(nn.Module):
         xl_memories_layers: Optional[Tuple[int, ...]] = None,
         recurrent_layers: Optional[Tuple[int, ...]] = None,
         num_state_vectors = None,
-        dynamic_pos_bias_dim = None,
         enhanced_recurrence = False,
-        ignore_index = -100
+        ignore_index = -100,
+        rotary_use_xpos = True
     ):
         super().__init__()
         num_state_vectors = default(num_state_vectors, block_width)
@@ -382,14 +460,7 @@ class BlockRecurrentTransformer(nn.Module):
 
         self.token_emb = nn.Embedding(num_tokens, dim)
 
-        pos_mlp_dim = default(dynamic_pos_bias_dim, dim // 4)
-        self.dynamic_pos_bias_mlp = nn.Sequential(
-            nn.Linear(1, pos_mlp_dim),
-            nn.SiLU(),
-            nn.Linear(pos_mlp_dim, pos_mlp_dim),
-            nn.SiLU(),
-            nn.Linear(pos_mlp_dim, heads)
-        )
+        self.rotary_pos_emb = RotaryEmbedding(dim = dim_head, use_xpos = rotary_use_xpos)
 
         self.layers = nn.ModuleList([])
 
@@ -510,19 +581,12 @@ class BlockRecurrentTransformer(nn.Module):
 
         # dynamic pos bias
 
-        rel_dist = torch.arange(w, dtype = x.dtype, device = device)
-        rel_dist = rearrange(rel_dist, '... -> ... 1')
-        pos_bias = self.dynamic_pos_bias_mlp(rel_dist)
-
         i_arange = torch.arange(w, device = device)
         j_arange = torch.arange(w * 2, device = device)
         rel_pos = ((rearrange(i_arange, 'i -> i 1') + w) - rearrange(j_arange, 'j -> 1 j')).abs()
-
         attn_mask = rel_pos < w  # make sure each token only looks back a block width
-        rel_pos = rel_pos.masked_fill(~attn_mask, 0)
 
-        pos_bias = pos_bias[rel_pos]
-        pos_bias = rearrange(pos_bias, 'i j h -> h i j')
+        rotary_pos_emb, xpos_scale = self.rotary_pos_emb(2 * w)
 
         # enhanced recurrence
 
@@ -553,7 +617,8 @@ class BlockRecurrentTransformer(nn.Module):
             # whether to pass in xl memories
 
             attn_kwargs = dict(
-                rel_pos_bias = pos_bias,
+                rotary_pos_emb = rotary_pos_emb,
+                xpos_scale = xpos_scale,
                 attn_mask = attn_mask,
                 return_memories_and_states = return_memories_and_states
             )
