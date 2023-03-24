@@ -65,6 +65,7 @@ $ python train.py
 
 - [ ] revisit <a href="https://github.com/lucidrains/memformer">memformer</a>
 - [ ] integrate <a href="https://github.com/hazyresearch/flash-attention">flash attention</a>
+- [ ] add ability to gate in memorizing transformers knn attention layers
 
 ## Citations
 
