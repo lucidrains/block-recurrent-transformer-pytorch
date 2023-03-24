@@ -33,7 +33,8 @@ model = BlockRecurrentTransformer(
     xl_memories_layers = (5, 6),    # which layers to use xl memories. very old deepmind papers have shown you only need the last penultimate layers to have cached key values to see majority of benefit
     num_state_vectors = 512,        # number of state vectors, i believe this was a single block size in the paper, but can be any amount
     recurrent_layers = (4,),        # where to place the recurrent layer(s) for states with fixed simple gating
-    enhanced_recurrence = True      # enhanced recurrence from ernie-doc paper, i have seen it to work well on my local machine
+    enhanced_recurrence = True,     # enhanced recurrence from ernie-doc paper, i have seen it to work well on my local machine
+    use_flash_attn = True           # use flash attention, if on pytorch 2.0
 )
 
 seq = torch.randint(0, 2000, (1, 1024))
@@ -62,9 +63,9 @@ $ python train.py
 - [x] test full system on enwik8 locally and ablate states and memories and see effects first  hand
 - [x] make sure attention allow for single head key / values too
 - [x] run a few experiments of fixed gating in regular transformers - does not work
+- [x] integrate <a href="https://github.com/hazyresearch/flash-attention">flash attention</a>
 
 - [ ] revisit <a href="https://github.com/lucidrains/memformer">memformer</a>
-- [ ] integrate <a href="https://github.com/hazyresearch/flash-attention">flash attention</a>
 - [ ] add ability to gate in memorizing transformers knn attention layers
 
 ## Citations
@@ -109,6 +110,23 @@ $ python train.py
     address = "Online",
     publisher = "Association for Computational Linguistics",
     url     = "https://www.aclweb.org/anthology/2020.acl-main.672"
+}
+```
+
+```bibtex
+@inproceedings{Sun2022ALT,
+    title     = {A Length-Extrapolatable Transformer},
+    author    = {Yutao Sun and Li Dong and Barun Patra and Shuming Ma and Shaohan Huang and Alon Benhaim and Vishrav Chaudhary and Xia Song and Furu Wei},
+    year      = {2022}
+}
+```
+
+```bibtex
+@inproceedings{dao2022flashattention,
+    title   = {Flash{A}ttention: Fast and Memory-Efficient Exact Attention with {IO}-Awareness},
+    author  = {Dao, Tri and Fu, Daniel Y. and Ermon, Stefano and Rudra, Atri and R{\'e}, Christopher},
+    booktitle = {Advances in Neural Information Processing Systems},
+    year    = {2022}
 }
 ```
 
