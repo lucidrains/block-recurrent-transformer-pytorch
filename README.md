@@ -69,6 +69,7 @@ $ python train.py
 
 - [ ] revisit <a href="https://github.com/lucidrains/memformer">memformer</a>
 - [ ] add ability to gate in memorizing transformers knn attention layers
+- [ ] figure out best way to cache the causal mask across all attention layers, but also reach out to pytorch team about some of the limitations for causal in q seq len != kv seq len scenario
 
 ## Citations
 
