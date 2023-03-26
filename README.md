@@ -6,7 +6,7 @@ Implementation of <a href="https://arxiv.org/abs/2203.07852">Block Recurrent Tra
 
 This design is SOTA for recurrent transformers line of research, afaict.
 
-It will also include <a href="https://arxiv.org/abs/2205.14135">flash attention</a> as well as <a href="https://arxiv.org/abs/2203.08913">memorizing transformers</a>
+It will also include <a href="https://arxiv.org/abs/2205.14135">flash attention</a> as well as <a href="https://arxiv.org/abs/2203.08913">KNN attention layers</a>
 
 ## Appreciation
 
@@ -66,10 +66,10 @@ $ python train.py
 - [x] make sure attention allow for single head key / values too
 - [x] run a few experiments of fixed gating in regular transformers - does not work
 - [x] integrate <a href="https://github.com/hazyresearch/flash-attention">flash attention</a>
+- [x] cache attention mask + rotary embeddings
 
 - [ ] revisit <a href="https://github.com/lucidrains/memformer">memformer</a>
 - [ ] add ability to gate in memorizing transformers knn attention layers
-- [ ] figure out best way to cache the causal mask across all attention layers, but also reach out to pytorch team about some of the limitations for causal in q seq len != kv seq len scenario
 
 ## Citations
 

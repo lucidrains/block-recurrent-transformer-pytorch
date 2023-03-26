@@ -113,17 +113,18 @@ class RotaryEmbedding(nn.Module):
         self,
         dim,
         scale_base = 512,
-        use_xpos = True,
         theta = 10000
     ):
         super().__init__()
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer("inv_freq", inv_freq)
+        self.register_buffer("inv_freq", inv_freq, persistent = False)
 
-        self.use_xpos = use_xpos
         self.scale_base = scale_base
         scale = (torch.arange(0, dim, 2) + 0.4 * dim) / (1.4 * dim)
-        self.register_buffer('scale', scale)
+        self.register_buffer('scale', scale, persistent = False)
+
+        self.register_buffer('cached_freqs', None, persistent = False)
+        self.register_buffer('cached_scales', None, persistent = False)
 
     @property
     def device(self):
@@ -131,17 +132,22 @@ class RotaryEmbedding(nn.Module):
 
     def forward(self, seq_len):
         device = self.device
+
+        if exists(self.cached_freqs):
+            cached_seq_len = self.cached_freqs.shape[-2]
+            if cached_seq_len >= seq_len:
+                return self.cached_freqs[:seq_len], self.cached_scales[:seq_len]
+
         t = torch.arange(seq_len, device = device).type_as(self.inv_freq)
         freqs = torch.einsum('i , j -> i j', t, self.inv_freq)
         freqs = torch.cat((freqs, freqs), dim = -1)
-
-        if not self.use_xpos:
-            return freqs, torch.ones(1, device = device)
 
         power = (t - (seq_len // 2)) / self.scale_base
         scale = self.scale ** rearrange(power, 'n -> n 1')
         scale = torch.cat((scale, scale), dim = -1)
 
+        self.register_buffer('cached_freqs', freqs, persistent = False)
+        self.register_buffer('cached_scales', scale, persistent = False)
         return freqs, scale
 
 def rotate_half(x):
@@ -323,7 +329,7 @@ class Attention(nn.Module):
     def __init__(
         self,
         dim_head,
-        causal = True,
+        causal = False,
         qk_rmsnorm = False,
         qk_rmsnorm_scale = 8,
         use_flash_attn = False
@@ -375,7 +381,6 @@ class AttentionBlock(nn.Module):
         self,
         dim,
         block_width,
-        causal = True,
         dim_head = 64,
         heads = 8,
         qk_rmsnorm = False,
@@ -393,7 +398,7 @@ class AttentionBlock(nn.Module):
 
         self.to_kv = nn.Linear(dim, dim_head * 2, bias = False)
 
-        self.attn = Attention(dim_head, causal = causal, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, use_flash_attn = use_flash_attn)
+        self.attn = Attention(dim_head, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, use_flash_attn = use_flash_attn)
 
         self.block_width = block_width
         self.is_recurrent_layer = num_state_vectors > 0
@@ -414,10 +419,10 @@ class AttentionBlock(nn.Module):
 
             self.to_state_out = nn.Linear(inner_dim * 2, dim, bias = False)
 
-            self.to_state_cross_attn = Attention(dim_head, causal = False, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, use_flash_attn = use_flash_attn)
+            self.to_state_cross_attn = Attention(dim_head, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, use_flash_attn = use_flash_attn)
 
-            self.state_self_attn = Attention(dim_head, causal = False, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, use_flash_attn = use_flash_attn)
-            self.from_state_cross_attn = Attention(dim_head, causal = False, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, use_flash_attn = use_flash_attn)
+            self.state_self_attn = Attention(dim_head, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, use_flash_attn = use_flash_attn)
+            self.from_state_cross_attn = Attention(dim_head, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, use_flash_attn = use_flash_attn)
 
             # gating related parameters - using the fixed simple config
 
@@ -476,10 +481,11 @@ class AttentionBlock(nn.Module):
             bk = pad_at_dim(bk, (1, 0), value = 0., dim = 1)
             bv = pad_at_dim(bv, (1, 0), value = 0., dim = 1)
 
-            # and make sure not to attend to this padding
-            if exists(attn_mask):
-                attn_mask = repeat(attn_mask, 'i j -> w 1 i j', w = bq.shape[1])
-                attn_mask[0, 0, :, :width] = False
+        # alter attention mask so that the first window looking back would either attend to nothing (in the case of padding), or everything (in the case of xl memories)
+
+        if exists(attn_mask):
+            attn_mask = repeat(attn_mask, 'i j -> w 1 i j', w = bq.shape[1])
+            attn_mask[0, 0, :, :width] = exists(xl_memories)
 
         # local attention with look back of one bucket - in paper they did total receptive field of 2 * block_width, with 1 block_width worth of memories, seems like a more efficient transformer-xl design?
 
@@ -590,7 +596,6 @@ class BlockRecurrentTransformer(nn.Module):
         num_state_vectors = None,
         enhanced_recurrence = False,
         ignore_index = -100,
-        rotary_use_xpos = True,
         use_flash_attn = False
     ):
         super().__init__()
@@ -607,7 +612,7 @@ class BlockRecurrentTransformer(nn.Module):
 
         self.token_emb = nn.Embedding(num_tokens, dim)
 
-        self.rotary_pos_emb = RotaryEmbedding(dim = dim_head, use_xpos = rotary_use_xpos)
+        self.rotary_pos_emb = RotaryEmbedding(dim = dim_head)
 
         self.layers = nn.ModuleList([])
 
@@ -627,7 +632,6 @@ class BlockRecurrentTransformer(nn.Module):
             self.layers.append(nn.ModuleList([
                 AttentionBlock(
                     dim,
-                    causal = True,
                     block_width = block_width,
                     dim_head = dim_head,
                     heads = heads,
@@ -651,6 +655,32 @@ class BlockRecurrentTransformer(nn.Module):
         self.ignore_index = ignore_index
 
         self.enhanced_recurrence = enhanced_recurrence
+
+        self.register_buffer('cached_causal_attn_mask', None, persistent = False)
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    def get_causal_attn_mask(self, width):
+        if exists(self.cached_causal_attn_mask):
+            cached_mask = self.cached_causal_attn_mask
+            cached_width = cached_mask.shape[-2]
+            padding = (width - cached_width) // 2
+            j_slice = Ellipsis if padding == 0 else slice(padding, -padding)
+            return cached_mask[:cached_width, j_slice]
+
+        device = self.device
+        causal_mask = torch.ones((width, 2 * width), device = device, dtype = torch.bool).tril(width)
+
+        i_arange = torch.arange(width, device = device)
+        j_arange = torch.arange(width * 2, device = device)
+        rel_pos = ((rearrange(i_arange, 'i -> i 1') + width) - rearrange(j_arange, 'j -> 1 j')).abs()
+        exact_lookback_attn_mask = rel_pos < width  # make sure each token only looks back a block width
+
+        mask = causal_mask & exact_lookback_attn_mask
+        self.register_buffer('cached_causal_attn_mask', mask, persistent = False)
+        return mask
 
     @torch.no_grad()
     @eval_decorator
@@ -728,11 +758,7 @@ class BlockRecurrentTransformer(nn.Module):
 
         # dynamic pos bias
 
-        i_arange = torch.arange(w, device = device)
-        j_arange = torch.arange(w * 2, device = device)
-        rel_pos = ((rearrange(i_arange, 'i -> i 1') + w) - rearrange(j_arange, 'j -> 1 j')).abs()
-        attn_mask = rel_pos < w  # make sure each token only looks back a block width
-
+        attn_mask = self.get_causal_attn_mask(w)
         rotary_pos_emb, xpos_scale = self.rotary_pos_emb(2 * w)
 
         # enhanced recurrence
