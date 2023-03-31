@@ -537,8 +537,10 @@ class AttentionBlock(nn.Module):
 
             # self attention qkv for states
 
-            state_q, state_k, state_v = (self.state_to_q(self.init_state), *self.state_to_kv(self.init_state).chunk(2, dim = -1))
-            state_q = repeat(state_q, 'n (h d) -> b h n d', h = self.heads, b = batch)
+            state_q, state_k, state_v = (self.state_to_q(states), *self.state_to_kv(states).chunk(2, dim = -1))
+
+            state_q_einsum = 'n (h d)' if state_q.ndim == 2 else 'b n (h d)'
+            state_q = repeat(state_q, f'{state_q_einsum} -> b h n d', h = self.heads, b = batch)
 
             # cross attend to the past states key values
 
