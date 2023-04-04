@@ -467,6 +467,8 @@ class AttentionBlock(nn.Module):
 
         bq, bk, bv = map(lambda t: rearrange(t, 'b ... (w n) d -> b w ... n d', n = width), (q, k, v))
 
+        orig_bk, orig_bv = bk, bv
+
         # save the last key / values as memories for recurrence
 
         memories = None
@@ -532,10 +534,13 @@ class AttentionBlock(nn.Module):
             if not exists(states):
                 states = self.init_state
 
-            for ind, (x_block, xk_block, xv_block) in enumerate(zip(x_blocks, bk.unbind(dim = 1), bv.unbind(dim = 1))):
+            for ind, (x_block, xk_block, xv_block) in enumerate(zip(x_blocks, orig_bk.unbind(dim = 1), orig_bv.unbind(dim = 1))):
                 is_last = ind == (len(x_blocks) - 1)
 
-                orig_states = states
+                block_seq_len = x_block.shape[-2]
+                xk_block, xv_block = xk_block[..., :block_seq_len, :], xv_block[..., :block_seq_len, :]
+
+                residual_states = states
 
                 # pre norm state for attention
 
@@ -593,7 +598,7 @@ class AttentionBlock(nn.Module):
 
                     # set new state with the learned EMA gating
 
-                    states = learned_ema_decay * z + (1 - learned_ema_decay) * orig_states
+                    states = learned_ema_decay * z + (1 - learned_ema_decay) * residual_states
 
             # concat the output of cross attending to the state vectors
 
