@@ -405,29 +405,31 @@ class AttentionBlock(nn.Module):
 
         self.to_out = nn.Linear(inner_dim * (2 if self.is_recurrent_layer else 1), dim, bias = False)
 
-        if self.is_recurrent_layer:
-            self.state_norm = LayerNorm(dim)
+        if not self.is_recurrent_layer:
+            return
 
-            self.q_to_state = nn.Linear(dim, inner_dim, bias = False)
-            self.q_from_state = nn.Linear(dim, inner_dim, bias = False)
+        self.state_norm = LayerNorm(dim)
 
-            self.state_to_q = nn.Linear(dim, inner_dim, bias = False)
-            self.state_to_kv = nn.Linear(dim, dim_head * 2, bias = False)
+        self.q_to_state = nn.Linear(dim, inner_dim, bias = False)
+        self.q_from_state = nn.Linear(dim, inner_dim, bias = False)
 
-            self.init_state = nn.Parameter(torch.randn(num_state_vectors, dim))
-            self.state_pos_ids = nn.Parameter(torch.randn(num_state_vectors, dim))
+        self.state_to_q = nn.Linear(dim, inner_dim, bias = False)
+        self.state_to_kv = nn.Linear(dim, dim_head * 2, bias = False)
 
-            self.to_state_out = nn.Linear(inner_dim * 2, dim, bias = False)
+        self.init_state = nn.Parameter(torch.randn(num_state_vectors, dim))
+        self.state_pos_ids = nn.Parameter(torch.randn(num_state_vectors, dim))
 
-            self.to_state_cross_attn = Attention(dim_head, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, use_flash_attn = use_flash_attn)
+        self.to_state_out = nn.Linear(inner_dim * 2, dim, bias = False)
 
-            self.state_self_attn = Attention(dim_head, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, use_flash_attn = use_flash_attn)
-            self.from_state_cross_attn = Attention(dim_head, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, use_flash_attn = use_flash_attn)
+        self.to_state_cross_attn = Attention(dim_head, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, use_flash_attn = use_flash_attn)
 
-            # gating related parameters - using the fixed simple config
+        self.state_self_attn = Attention(dim_head, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, use_flash_attn = use_flash_attn)
+        self.from_state_cross_attn = Attention(dim_head, qk_rmsnorm = qk_rmsnorm, qk_rmsnorm_scale = qk_rmsnorm_scale, use_flash_attn = use_flash_attn)
 
-            self.state_out_to_gate = nn.Linear(dim, dim)
-            self.learned_ema_beta = nn.Parameter(torch.randn(dim))
+        # gating related parameters - using the fixed simple config
+
+        self.state_out_to_gate = nn.Linear(dim, dim)
+        self.learned_ema_beta = nn.Parameter(torch.randn(dim))
 
     @property
     def device(self):
@@ -515,92 +517,96 @@ class AttentionBlock(nn.Module):
 
         new_states = None
 
+        # early return if not a recurrent layer
+
+        if not self.is_recurrent_layer:
+            return self.to_out(out), memories, new_states
+
         # if designated a recurrent layer, do all the state logic
         # it was hard moving this to a separate module, as the attention is closely intertwined between the current tokens and state tokens
 
-        if self.is_recurrent_layer:
-            # process input in blocks
+        # process input in blocks
 
-            x_blocks, k_blocks, v_blocks = map(lambda t: t[:, :seq_len].split(width, dim = -2), (x, k, v))
+        x_blocks, k_blocks, v_blocks = map(lambda t: t[:, :seq_len].split(width, dim = -2), (x, k, v))
 
-            # ready attended output of the input to the state, concatted block by block
+        # ready attended output of the input to the state, concatted block by block
 
-            to_state_out = torch.empty((batch, 0, out.shape[-1]), device = device, dtype = out.dtype)
+        to_state_out = torch.empty((batch, 0, out.shape[-1]), device = device, dtype = out.dtype)
 
-            # use initial state if no states were passed in
+        # use initial state if no states were passed in
 
-            if not exists(states):
-                states = self.init_state
+        if not exists(states):
+            states = self.init_state
 
-            for ind, (x_block, xk_block, xv_block) in enumerate(zip(x_blocks, k_blocks, v_blocks)):
-                is_last = ind == (len(x_blocks) - 1)
+        for ind, (x_block, xk_block, xv_block) in enumerate(zip(x_blocks, k_blocks, v_blocks)):
+            is_last = ind == (len(x_blocks) - 1)
 
-                residual_states = states
+            residual_states = states
 
-                # pre norm state for attention
+            # pre norm state for attention
 
-                states = self.state_norm(states)
+            states = self.state_norm(states)
 
-                # add the positional ids, as stated in the paper critical for it to work
+            # add the positional ids, as stated in the paper critical for it to work
 
-                states = states + self.state_pos_ids
+            states = states + self.state_pos_ids
 
-                # get queries for cross attention, which they do not share, although they share key / values. another intriguing detail
+            # get queries for cross attention, which they do not share, although they share key / values. another intriguing detail
 
-                q_to_state = self.q_to_state(x_block)
-                q_from_state = self.q_from_state(states)
+            q_to_state = self.q_to_state(x_block)
+            q_from_state = self.q_from_state(states)
 
-                q_to_state, q_from_state = map(lambda t: rearrange(t, '... n (h d) -> ... h n d', h = self.heads), (q_to_state, q_from_state))
+            q_to_state, q_from_state = map(lambda t: rearrange(t, '... n (h d) -> ... h n d', h = self.heads), (q_to_state, q_from_state))
 
-                # self attention qkv for states
+            # self attention qkv for states
 
-                state_q, state_k, state_v = (self.state_to_q(states), *self.state_to_kv(states).chunk(2, dim = -1))
+            state_q, state_k, state_v = (self.state_to_q(states), *self.state_to_kv(states).chunk(2, dim = -1))
 
-                state_q_einsum = 'n (h d)' if state_q.ndim == 2 else 'b n (h d)'
-                state_q = repeat(state_q, f'{state_q_einsum} -> b h n d', h = self.heads, b = batch)
+            state_q_einsum = 'n (h d)' if state_q.ndim == 2 else 'b n (h d)'
+            state_q = repeat(state_q, f'{state_q_einsum} -> b h n d', h = self.heads, b = batch)
 
-                # cross attend to the past states key values
+            # cross attend to the past states key values
 
-                to_state_out_block = self.to_state_cross_attn(q_to_state, state_k, state_v)
+            to_state_out_block = self.to_state_cross_attn(q_to_state, state_k, state_v)
 
-                to_state_out_block = rearrange(to_state_out_block, 'b h n d -> b n (h d)')
+            to_state_out_block = rearrange(to_state_out_block, 'b h n d -> b n (h d)')
 
-                to_state_out = torch.cat((to_state_out, to_state_out_block), dim = -2)
+            to_state_out = torch.cat((to_state_out, to_state_out_block), dim = -2)
 
-                # if need to return states, or is not the last block, calculate state update
+            # if need to return states, or is not the last block, calculate state update
 
-                if return_memories_and_states or not is_last:
+            if return_memories_and_states or not is_last:
 
-                    # states must also undergo self attention
+                # states must also undergo self attention
 
-                    if q_from_state.ndim == 3:
-                        q_from_state = repeat(q_from_state, '... -> b ...', b = batch)
+                if q_from_state.ndim == 3:
+                    q_from_state = repeat(q_from_state, '... -> b ...', b = batch)
 
-                    state_out = self.state_self_attn(state_q, state_k, state_v)
+                state_out = self.state_self_attn(state_q, state_k, state_v)
 
-                    from_state_out = self.from_state_cross_attn(q_from_state, xk_block, xv_block)
+                from_state_out = self.from_state_cross_attn(q_from_state, xk_block, xv_block)
 
-                    state_out = torch.cat((state_out, from_state_out), dim = -1)
-                    state_out = rearrange(state_out, 'b h n d -> b n (h d)')
+                state_out = torch.cat((state_out, from_state_out), dim = -1)
+                state_out = rearrange(state_out, 'b h n d -> b n (h d)')
 
-                    state_out = self.to_state_out(state_out)
+                state_out = self.to_state_out(state_out)
 
-                    # use the best performing configuration
-                    # fixed simple gate - nothing more than a learned EMA with some resemblance to highway networks
+                # use the best performing configuration
+                # fixed simple gate - nothing more than a learned EMA with some resemblance to highway networks
 
-                    z = self.state_out_to_gate(state_out)
-                    learned_ema_decay = self.learned_ema_beta.sigmoid()
+                z = self.state_out_to_gate(state_out)
+                learned_ema_decay = self.learned_ema_beta.sigmoid()
 
-                    # set new state with the learned EMA gating
+                # set new state with the learned EMA gating
 
-                    states = learned_ema_decay * z + (1 - learned_ema_decay) * residual_states
+                states = learned_ema_decay * z + (1 - learned_ema_decay) * residual_states
 
-            # concat the output of cross attending to the state vectors
+        # concat the output of cross attending to the state vectors
 
-            out = torch.cat((out, to_state_out), dim = -1)
+        out = torch.cat((out, to_state_out), dim = -1)
 
-            if return_memories_and_states:
-                new_states = states
+        if return_memories_and_states:
+            new_states = states
 
         return self.to_out(out), memories, new_states
 
