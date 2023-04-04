@@ -467,8 +467,6 @@ class AttentionBlock(nn.Module):
 
         bq, bk, bv = map(lambda t: rearrange(t, 'b ... (w n) d -> b w ... n d', n = width), (q, k, v))
 
-        orig_bk, orig_bv = bk, bv
-
         # save the last key / values as memories for recurrence
 
         memories = None
@@ -523,7 +521,7 @@ class AttentionBlock(nn.Module):
         if self.is_recurrent_layer:
             # process input in blocks
 
-            x_blocks = x[:, :seq_len].split(width, dim = -2)
+            x_blocks, k_blocks, v_blocks = map(lambda t: t[:, :seq_len].split(width, dim = -2), (x, k, v))
 
             # ready attended output of the input to the state, concatted block by block
 
@@ -534,11 +532,8 @@ class AttentionBlock(nn.Module):
             if not exists(states):
                 states = self.init_state
 
-            for ind, (x_block, xk_block, xv_block) in enumerate(zip(x_blocks, orig_bk.unbind(dim = 1), orig_bv.unbind(dim = 1))):
+            for ind, (x_block, xk_block, xv_block) in enumerate(zip(x_blocks, k_blocks, v_blocks)):
                 is_last = ind == (len(x_blocks) - 1)
-
-                block_seq_len = x_block.shape[-2]
-                xk_block, xv_block = xk_block[..., :block_seq_len, :], xv_block[..., :block_seq_len, :]
 
                 residual_states = states
 
