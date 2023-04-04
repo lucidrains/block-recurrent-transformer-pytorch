@@ -70,6 +70,7 @@ $ python train.py
 
 - [ ] revisit <a href="https://github.com/lucidrains/memformer">memformer</a>
 - [ ] add ability to gate in memorizing transformers knn attention layers
+- [ ] add <a href="https://github.com/lucidrains/compressive-transformer-pytorch">compressed memories</a>
 
 ## Citations
 
