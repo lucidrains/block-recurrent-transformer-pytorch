@@ -56,7 +56,6 @@ model = BlockRecurrentTransformer(
     block_width = 512,
     num_state_vectors = 512,
     recurrent_layers = (4,),
-    enhanced_recurrence = True,
     use_flash_attn = True
 )
 

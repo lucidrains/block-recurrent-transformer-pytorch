@@ -593,7 +593,6 @@ class BlockRecurrentTransformer(nn.Module):
         block_width = 512,
         recurrent_layers: Optional[Tuple[int, ...]] = None,
         num_state_vectors = None,
-        enhanced_recurrence = False,
         ignore_index = -100,
         use_flash_attn = False
     ):
@@ -647,8 +646,6 @@ class BlockRecurrentTransformer(nn.Module):
         assert divisible_by(max_seq_len, block_width)
 
         self.ignore_index = ignore_index
-
-        self.enhanced_recurrence = enhanced_recurrence
 
         self.register_buffer('cached_causal_attn_mask', None, persistent = False)
 
@@ -772,11 +769,6 @@ class BlockRecurrentTransformer(nn.Module):
         # process each block at a time
 
         for input_block in input_blocks:
-
-            # enhanced recurrence
-
-            if self.enhanced_recurrence and len(xl_memories) > 1:
-                xl_memories = [*xl_memories[1:], xl_memories[0]]
 
             # ready xl memories and states
 
