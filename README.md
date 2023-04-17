@@ -32,7 +32,6 @@ model = BlockRecurrentTransformer(
     heads = 8,                      # number of attention heads
     max_seq_len = 1024,             # the total receptive field of the transformer, in the paper this was 2 * block size
     block_width = 512,              # block size - total receptive field is max_seq_len, 2 * block size in paper. the block furthest forwards becomes the new cached xl memories, which is a block size of 1 (please open an issue if i am wrong)
-    xl_memories_layers = (5, 6),    # which layers to use xl memories. very old deepmind papers have shown you only need the last penultimate layers to have cached key values to see majority of benefit
     num_state_vectors = 512,        # number of state vectors, i believe this was a single block size in the paper, but can be any amount
     recurrent_layers = (4,),        # where to place the recurrent layer(s) for states with fixed simple gating
     enhanced_recurrence = True,     # enhanced recurrence from ernie-doc paper, i have seen it to work well on my local machine
@@ -101,19 +100,6 @@ $ python train.py
     journal = {ArXiv},
     year    = {2019},
     volume  = {abs/1911.02150}
-}
-```
-
-```bibtex
-@inproceedings{rae-razavi-2020-transformers,
-    title   = "Do Transformers Need Deep Long-Range Memory?",
-    author  = "Rae, Jack  and Razavi, Ali",
-    booktitle = "Proceedings of the 58th Annual Meeting of the Association for Computational Linguistics",
-    month   = jul,
-    year    = "2020",
-    address = "Online",
-    publisher = "Association for Computational Linguistics",
-    url     = "https://www.aclweb.org/anthology/2020.acl-main.672"
 }
 ```
 

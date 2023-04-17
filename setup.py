@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'block-recurrent-transformer-pytorch',
   packages = find_packages(exclude=[]),
-  version = '0.2.2',
+  version = '0.3.0',
   license='MIT',
   description = 'Block Recurrent Transformer - Pytorch',
   author = 'Phil Wang',
