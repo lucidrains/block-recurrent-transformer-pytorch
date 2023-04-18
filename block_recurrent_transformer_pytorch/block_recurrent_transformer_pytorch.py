@@ -218,6 +218,10 @@ class StateContainer(nn.Module):
         self.state_out_to_gate = nn.Linear(dim, dim)
         self.learned_ema_beta = nn.Parameter(torch.randn(dim))
 
+        # since each read should be followed by a write, just store cache in the container
+
+        self.cache = None
+
     def read(
         self,
         x,
@@ -252,42 +256,34 @@ class StateContainer(nn.Module):
 
         to_state_out = rearrange(to_state_out, 'b h n d -> b n (h d)')
 
-        # cache for state kv
+        # cache for next write
 
-        cache = (state_k, state_v)
+        self.cache = (states, normed_states, state_k, state_v)
 
-        return to_state_out, states, cache
+        return to_state_out
 
     def write(
         self,
         *,
         keys,
-        values,
-        states,
-        cache = None
+        values
     ):
-        assert exists(states)
+        assert exists(self.cache)
 
         batch, k, v = keys.shape[0], keys, values
 
-        # pre norm state for attention
+        # get cached values from the previous read
 
-        normed_states = self.state_norm(states)
+        states, normed_states, state_k, state_v = self.cache
 
-        # add the positional ids, as stated in the paper critical for it to work
+        self.cache = None
 
-        normed_states = normed_states + self.state_pos_ids
+        # derive queries
 
-        q_from_state = self.q_from_state(states)
+        q_from_state = self.q_from_state(normed_states)
         q_from_state = rearrange(q_from_state, '... n (h d) -> ... h n d', h = self.heads)
 
         state_q = self.state_to_q(normed_states)
-
-        if exists(cache):
-            state_k, state_v = cache
-        else:
-            state_k, state_v = self.state_to_kv(normed_states).chunk(2, dim = -1)
-
         state_q_einsum = 'n (h d)' if state_q.ndim == 2 else 'b n (h d)'
         state_q = repeat(state_q, f'{state_q_einsum} -> b h n d', h = self.heads, b = batch)
 
@@ -628,9 +624,9 @@ class AttentionBlock(nn.Module):
 
         # read from the states ...
 
-        to_state_out, states, state_kv_cache = self.state_container.read(
+        to_state_out = self.state_container.read(
             x,
-            states = states,
+            states = states
         )
 
         # and concat it to the output of self-attention
@@ -641,9 +637,7 @@ class AttentionBlock(nn.Module):
 
         new_states = self.state_container.write(
             keys = k,
-            values = v,
-            states = states,
-            cache = state_kv_cache
+            values = v
         )
 
         return self.to_out(out), memories, new_states
