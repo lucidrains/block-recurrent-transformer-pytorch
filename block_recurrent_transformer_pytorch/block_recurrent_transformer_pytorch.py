@@ -265,12 +265,12 @@ class StateContainer(nn.Module):
     def write(
         self,
         *,
-        keys,
-        values
+        memories
     ):
         assert exists(self.cache)
 
-        batch, k, v = keys.shape[0], keys, values
+        k, v = memories
+        batch = k.shape[0]
 
         # get cached values from the previous read
 
@@ -566,7 +566,6 @@ class AttentionBlock(nn.Module):
         rotary_pos_emb = None,
         xpos_scale = None,
         attn_mask = None,
-        return_memories_and_states = None,
         xl_memories: Optional[torch.Tensor] = None,
         states: Optional[torch.Tensor] = None
     ):
@@ -585,10 +584,7 @@ class AttentionBlock(nn.Module):
 
         # save the last key / values as memories for recurrence
 
-        memories = None
-
-        if return_memories_and_states:
-            memories = torch.stack((k, v))
+        memories = torch.stack((k, v))
 
         mem_len = 0
 
@@ -624,10 +620,7 @@ class AttentionBlock(nn.Module):
 
         # read from the states ...
 
-        to_state_out = self.state_container.read(
-            x,
-            states = states
-        )
+        to_state_out = self.state_container.read(x, states = states)
 
         # and concat it to the output of self-attention
 
@@ -635,10 +628,7 @@ class AttentionBlock(nn.Module):
 
         # then write to the states as well
 
-        new_states = self.state_container.write(
-            keys = k,
-            values = v
-        )
+        new_states = self.state_container.write(memories = memories)
 
         return self.to_out(out), memories, new_states
 
@@ -860,8 +850,7 @@ class BlockRecurrentTransformer(nn.Module):
                     rotary_pos_emb = rotary_pos_emb,
                     xpos_scale = xpos_scale,
                     attn_mask = attn_mask,
-                    xl_memories = next(xl_memories, None),
-                    return_memories_and_states = return_memories_and_states
+                    xl_memories = next(xl_memories, None)
                 )
 
                 if is_state_layer:
