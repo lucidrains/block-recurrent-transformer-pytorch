@@ -1,7 +1,7 @@
 import math
 from random import random
 from functools import wraps, partial
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 from packaging import version
 
 from einops import rearrange
@@ -23,6 +23,9 @@ def exists(val):
 
 def default(val, d):
     return val if exists(val) else d
+
+def all_unique(arr):
+    return len(arr) == len(set(arr))
 
 def eval_decorator(fn):
     def inner(self, *args, **kwargs):
@@ -221,17 +224,22 @@ class StateContainer(nn.Module):
         # since each read should be followed by a write, just store cache in the container
 
         self.cache = None
+        self.next_read_state = None
 
-    def read(
+    def set_next_read_state(
         self,
-        x,
-        *,
-        states = None,
+        states
     ):
-        # use initial state if no states were passed in
-
         if not exists(states):
             states = self.init_state
+
+        self.next_read_state = (states,)
+
+    def read(self, x):
+        assert exists(self.next_read_state), 'states to be read must be set with .set_next_read_state'
+
+        states, = self.next_read_state
+        self.next_read_state = None
 
         # pre norm state for attention
 
@@ -523,8 +531,10 @@ class AttentionBlock(nn.Module):
         heads = 8,
         qk_rmsnorm = False,
         qk_rmsnorm_scale = 8,
+        use_flash_attn = False,
         num_state_vectors = 0,
-        use_flash_attn = False
+        num_external_state_reads = 0,
+        state_read_before_write = True  # this will be defaulted to on as in the paper, but will be turned off in the case the researcher wants to test out reading the state at a lower layer
     ):
         super().__init__()
         inner_dim = dim_head * heads
@@ -541,10 +551,16 @@ class AttentionBlock(nn.Module):
         self.block_width = block_width
         self.is_recurrent_layer = num_state_vectors > 0
 
-        self.to_out = nn.Linear(inner_dim * (2 if self.is_recurrent_layer else 1), dim, bias = False)
+        # decide how many states this attention layer is going to read from
+
+        num_state_reads = int(self.is_recurrent_layer and state_read_before_write) + num_external_state_reads
+
+        self.to_out = nn.Linear(inner_dim * (1 + num_state_reads), dim, bias = False)
 
         if not self.is_recurrent_layer:
             return
+
+        self.state_read_before_write = state_read_before_write
 
         self.state_container = StateContainer(
             dim,
@@ -567,7 +583,7 @@ class AttentionBlock(nn.Module):
         xpos_scale = None,
         attn_mask = None,
         xl_memories: Optional[torch.Tensor] = None,
-        states: Optional[torch.Tensor] = None
+        read_from_state_containers: List[StateContainer] = []
     ):
         batch, seq_len, _, width, device = *x.shape, self.block_width, self.device
 
@@ -615,20 +631,29 @@ class AttentionBlock(nn.Module):
 
         # early return if not a recurrent layer
 
-        if not self.is_recurrent_layer:
+        if not self.is_recurrent_layer and len(read_from_state_containers) == 0:
             return self.to_out(out), memories, None
 
-        # read from the states ...
+        # whether to read from own state container, default to on, but may pass in more
 
-        to_state_out = self.state_container.read(x, states = states)
+        if self.is_recurrent_layer and self.state_read_before_write:
+            read_from_state_containers = [self.state_container, *read_from_state_containers]
 
-        # and concat it to the output of self-attention
+        for read_state_container in read_from_state_containers:
+            # read from the states ...
 
-        out = torch.cat((out, to_state_out), dim = -1)
+            to_state_out = read_state_container.read(x)
 
-        # then write to the states as well
+            # and concat it to the output of self-attention
 
-        new_states = self.state_container.write(memories = memories)
+            out = torch.cat((out, to_state_out), dim = -1)
+
+        new_states = None
+
+        if self.is_recurrent_layer:
+            # then write to the states as well if need be
+
+            new_states = self.state_container.write(memories = memories)
 
         return self.to_out(out), memories, new_states
 
@@ -649,6 +674,7 @@ class BlockRecurrentTransformer(nn.Module):
         max_seq_len = 1024,
         block_width = 512,
         recurrent_layers: Optional[Tuple[int, ...]] = None,
+        read_recurrent_layers: Optional[Tuple[int, ...]] = None,
         num_state_vectors = None,
         ignore_index = -100,
         use_flash_attn = False
@@ -656,10 +682,26 @@ class BlockRecurrentTransformer(nn.Module):
         super().__init__()
         num_state_vectors = default(num_state_vectors, block_width)
 
-        recurrent_layers = default(recurrent_layers, (depth // 2,)) # default to one recurent layer at middle of the network
-        self.recurrent_layers = set(recurrent_layers)
+        # set recurrent layers
 
-        assert all([0 < layer <= depth for layer in recurrent_layers])
+        recurrent_layers = default(recurrent_layers, (depth // 2,)) # default to one recurent layer at middle of the network
+
+        assert all([0 < layer <= depth for layer in recurrent_layers]), f'recurrent layers must range from 1 to the depth {depth}'
+        assert all_unique(recurrent_layers), 'recurrent layers must be all unique. no duplicate layers'
+
+        self.recurrent_layers = recurrent_layers
+
+        # set read recurrent layers
+
+        read_recurrent_layers = default(read_recurrent_layers, recurrent_layers)
+
+        assert all([read_layer <= write_layer for read_layer, write_layer in zip(read_recurrent_layers, recurrent_layers)]), 'the recurrent read layer must be always less than or equal to the write layer'
+        assert all([0 < layer <= depth for layer in read_recurrent_layers])
+        assert len(read_recurrent_layers) == len(recurrent_layers)
+
+        self.read_recurrent_layers = read_recurrent_layers
+
+        # token embedding
 
         self.token_emb = nn.Embedding(num_tokens, dim)
 
@@ -667,10 +709,16 @@ class BlockRecurrentTransformer(nn.Module):
 
         self.layers = nn.ModuleList([])
 
+        self.write_to_read_map = {write_layer: read_layer for write_layer, read_layer in zip(recurrent_layers, read_recurrent_layers)}
+
+        self.read_state_router = defaultdict(list)
+
         for layer in range(1, depth + 1):
             is_recurrent_layer = layer in self.recurrent_layers
 
             layer_num_state_vectors = num_state_vectors if is_recurrent_layer else 0
+
+            num_external_state_reads = sum([int(layer == read_layer) for read_layer in read_recurrent_layers])
 
             # only layers with xl memories
             # or has recurrence in horizontal direction
@@ -679,18 +727,30 @@ class BlockRecurrentTransformer(nn.Module):
 
             qk_rmsnorm = all_layers_qk_rmsnorm or is_recurrent_layer
 
+            attn_block = AttentionBlock(
+                dim,
+                block_width = block_width,
+                dim_head = dim_head,
+                heads = heads,
+                qk_rmsnorm = qk_rmsnorm,
+                num_state_vectors = layer_num_state_vectors,
+                use_flash_attn = use_flash_attn,
+                num_external_state_reads = num_external_state_reads,
+                state_read_before_write = False,
+            )
+
+            ff_block = FeedForward(dim, mult = ff_mult)
+
+            if is_recurrent_layer:
+                read_layer = self.write_to_read_map[layer]
+                self.read_state_router[read_layer].append(attn_block.state_container)
+
             self.layers.append(nn.ModuleList([
-                AttentionBlock(
-                    dim,
-                    block_width = block_width,
-                    dim_head = dim_head,
-                    heads = heads,
-                    qk_rmsnorm = qk_rmsnorm,
-                    num_state_vectors = layer_num_state_vectors,
-                    use_flash_attn = use_flash_attn
-                ),
-                FeedForward(dim, mult = ff_mult)
+                attn_block,
+                ff_block
             ]))
+
+        # to logits
 
         self.to_logits = nn.Sequential(
             LayerNorm(dim),
@@ -835,6 +895,14 @@ class BlockRecurrentTransformer(nn.Module):
             next_xl_memories = []
             next_states = []
 
+            # set the states on the appropriate state containers
+
+            for attn, _ in self.layers:
+                if not attn.is_recurrent_layer:
+                    continue
+
+                attn.state_container.set_next_read_state(next(states, None))
+
             # go through layers
 
             for ind, (attn, ff) in enumerate(self.layers):
@@ -842,7 +910,6 @@ class BlockRecurrentTransformer(nn.Module):
                 # determine if the layer requires transformer xl memories
 
                 layer = ind + 1
-                is_state_layer  = attn.is_recurrent_layer
 
                 # whether to pass in xl memories
 
@@ -850,11 +917,9 @@ class BlockRecurrentTransformer(nn.Module):
                     rotary_pos_emb = rotary_pos_emb,
                     xpos_scale = xpos_scale,
                     attn_mask = attn_mask,
-                    xl_memories = next(xl_memories, None)
+                    xl_memories = next(xl_memories, None),
+                    read_from_state_containers = self.read_state_router[layer]
                 )
-
-                if is_state_layer:
-                    attn_kwargs.update(states = next(states, None))
 
                 # attention layer
 
