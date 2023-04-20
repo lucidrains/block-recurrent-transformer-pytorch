@@ -1,16 +1,17 @@
 import math
 from random import random
 from functools import wraps, partial
+from itertools import zip_longest
 from collections import namedtuple, defaultdict
 from packaging import version
 
-from einops import rearrange
 
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum
 
 from einops import rearrange, repeat, pack, unpack
+from einops.layers.torch import Rearrange
 
 from beartype import beartype
 from beartype.door import is_bearable
@@ -23,6 +24,12 @@ def exists(val):
 
 def default(val, d):
     return val if exists(val) else d
+
+def is_empty(t: torch.Tensor):
+    return t.numel() == 0
+
+def cast_tuple(t, length = 1):
+    return t if isinstance(t, tuple) else ((t,) * length)
 
 def all_unique(arr):
     return len(arr) == len(set(arr))
@@ -47,6 +54,8 @@ def once(fn):
         return fn(x)
     return inner
 
+print_once = once(print)
+
 def compact(arr):
     return [*filter(exists, arr)]
 
@@ -58,7 +67,13 @@ def and_reduce(arr: List[torch.Tensor]):
         head = head & t
     return head
 
-print_once = once(print)
+def safe_cat(*args, dim = 1):
+    args = compact(args)
+
+    if len(args) == 0:
+        return None
+
+    return torch.cat(args, dim = dim)
 
 def divisible_by(numer, denom):
     return (numer % denom) == 0
@@ -115,10 +130,13 @@ class RotaryEmbedding(nn.Module):
     def __init__(
         self,
         dim,
+        width,
         scale_base = 512,
         theta = 10000
     ):
         super().__init__()
+        self.width = width
+
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq, persistent = False)
 
@@ -133,8 +151,8 @@ class RotaryEmbedding(nn.Module):
     def device(self):
         return next(self.buffers()).device
 
-    def forward(self, seq_len):
-        device = self.device
+    def forward(self):
+        device, seq_len = self.device, self.width
 
         if exists(self.cached_freqs):
             cached_seq_len = self.cached_freqs.shape[-2]
@@ -172,6 +190,107 @@ def apply_rotary_pos_emb(t, pos, scale = 1.):
         scale = scale[-seq_len:]
 
     return (t * pos.cos() * scale) + (rotate_half(t) * pos.sin() * scale)
+
+# memory management
+
+class MemoryManager(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        layers = 1,
+        mem_lengths = 512,
+        compress_factors = 1
+    ):
+        super().__init__()
+        mem_lengths = cast_tuple(mem_lengths)
+        compress_factors = cast_tuple(compress_factors)
+
+        assert all([mem_length > 0 for mem_length in mem_lengths])
+        assert len(mem_lengths) == len(compress_factors)
+        assert layers >= 1
+
+        self.mem_lengths = mem_lengths
+        self.compress_factors = compress_factors
+
+        self.layers = nn.ModuleList([])
+
+        for _ in range(layers):
+            compress_fns = nn.ModuleList([])
+
+            for compress_factor in compress_factors:
+                compress_fn = nn.Identity()
+                if compress_factor > 1:
+                    compress_fn = nn.Sequential(
+                        Rearrange('b n d -> b d n'),
+                        nn.Conv1d(
+                            dim * 2,
+                            dim * 2,
+                            compress_factor,
+                            stride = compress_factor,
+                            groups = 2
+                        ),
+                        Rearrange('b d n -> b n d'),
+                    )
+
+                compress_fns.append(compress_fn)
+
+            self.layers.append(compress_fns)
+
+    def forward(
+        self,
+        past_memories: List[torch.Tensor],
+        new_memories: List[torch.Tensor]
+    ):
+        next_memories = []
+
+        for past_memory, new_memory, compress_fns in zip_longest(past_memories, new_memories, self.layers):
+
+            # edge case if neither memories exist
+
+            if not (exists(past_memory) or exists(new_memory)):
+                next_memories.append(None)
+                continue
+
+            next_memory = None
+
+            for mem_length, compress_factor, compress_fn in zip(self.mem_lengths, self.compress_factors, compress_fns):
+
+                # first get the memories for the given compression factor "current_memory"
+
+                current_memory = None
+                if exists(past_memory):
+                    past_memory, current_memory = past_memory[..., :-mem_length, :], past_memory[..., -mem_length:, :]
+
+                # compress the new memories coming in, based on the compression factors set at init
+
+                if (not is_empty(new_memory)) and compress_factor > 1:
+                    # make sure memory length is divisible by compression factor
+
+                    new_mem_length = new_memory.shape[-2]
+                    curtailed_length = (new_mem_length // compress_factor) * compress_factor
+                    new_memory = new_memory[..., -curtailed_length:, :]
+
+                    # compress the memory pushed to the next stage
+
+                    new_memory = rearrange(new_memory, 'm b n d -> b n (m d)')
+                    new_memory = compress_fn(new_memory)
+                    new_memory = rearrange(new_memory, 'b n (m d) -> m b n d', m = 2)
+
+                # fifo memory queue
+                # add the new memory on the right
+
+                current_memory = safe_cat(current_memory, new_memory, dim = -2)
+                # "new" memory is new with respect to the next compressed segment
+
+                new_memory, current_memory = current_memory[..., :-mem_length, :], current_memory[..., -mem_length:, :]
+                # concat the new memory to the left into the past
+
+                next_memory = safe_cat(current_memory, next_memory, dim = -2)
+
+            next_memories.append(next_memory)
+
+        return next_memories
 
 # maybe flash attention, if using pytorch 2.0
 
@@ -614,7 +733,8 @@ class AttentionBlock(nn.Module):
         # handle cropping of attention mask and positional embeddings
 
         if exists(attn_mask):
-            attn_mask = attn_mask[:seq_len, (width - mem_len):(width + seq_len)]
+            attn_mask = attn_mask[:seq_len, :seq_len]
+            attn_mask = F.pad(attn_mask, (mem_len, 0), value = True)
 
         # attention, but of course
 
@@ -677,7 +797,9 @@ class BlockRecurrentTransformer(nn.Module):
         read_recurrent_layers: Optional[Tuple[int, ...]] = None,
         num_state_vectors = None,
         ignore_index = -100,
-        use_flash_attn = False
+        use_flash_attn = False,
+        use_compressed_mem = False,
+        compressed_mem_factor = 4
     ):
         super().__init__()
         num_state_vectors = default(num_state_vectors, block_width)
@@ -705,7 +827,7 @@ class BlockRecurrentTransformer(nn.Module):
 
         self.token_emb = nn.Embedding(num_tokens, dim)
 
-        self.rotary_pos_emb = RotaryEmbedding(dim = dim_head)
+        self.rotary_pos_emb = RotaryEmbedding(dim = dim_head, width = (2 if not use_compressed_mem else 3) * block_width)
 
         self.layers = nn.ModuleList([])
 
@@ -750,6 +872,15 @@ class BlockRecurrentTransformer(nn.Module):
                 ff_block
             ]))
 
+        # (compressed) memory management
+
+        self.mem_manager = MemoryManager(
+            dim = dim_head,
+            layers = depth,
+            mem_lengths = block_width if not use_compressed_mem else (block_width, block_width // 2),
+            compress_factors = 1 if not use_compressed_mem else (1, compressed_mem_factor)
+        )
+
         # to logits
 
         self.to_logits = nn.Sequential(
@@ -779,16 +910,8 @@ class BlockRecurrentTransformer(nn.Module):
             return cached_mask[:cached_width, j_slice]
 
         device = self.device
-        causal_mask = torch.ones((width, 2 * width), device = device, dtype = torch.bool).tril(width)
-
-        i_arange = torch.arange(width, device = device)
-        j_arange = torch.arange(width * 2, device = device)
-        rel_pos = ((rearrange(i_arange, 'i -> i 1') + width) - rearrange(j_arange, 'j -> 1 j')).abs()
-        exact_lookback_attn_mask = rel_pos < width  # make sure each token only looks back a block width
-
-        mask = causal_mask & exact_lookback_attn_mask
-        self.register_buffer('cached_causal_attn_mask', mask, persistent = False)
-        return mask
+        causal_mask = torch.ones((width, width), device = device, dtype = torch.bool).triu(1)
+        return ~causal_mask
 
     @torch.no_grad()
     @eval_decorator
@@ -867,7 +990,7 @@ class BlockRecurrentTransformer(nn.Module):
         # dynamic pos bias
 
         attn_mask = self.get_causal_attn_mask(w)
-        rotary_pos_emb, xpos_scale = self.rotary_pos_emb(2 * w)
+        rotary_pos_emb, xpos_scale = self.rotary_pos_emb()
 
         # only return memories and state if at the full block width, but can be overridden
 
@@ -886,11 +1009,12 @@ class BlockRecurrentTransformer(nn.Module):
         # process each block at a time
 
         for input_block in input_blocks:
+            input_block_length = input_block.shape[-2]
 
             # ready xl memories and states
 
-            xl_memories = iter(xl_memories)
-            states = iter(states)
+            iter_xl_memories = iter(xl_memories)
+            iter_states = iter(states)
 
             next_xl_memories = []
             next_states = []
@@ -901,7 +1025,7 @@ class BlockRecurrentTransformer(nn.Module):
                 if not attn.is_recurrent_layer:
                     continue
 
-                attn.state_container.set_next_read_state(next(states, None))
+                attn.state_container.set_next_read_state(next(iter_states, None))
 
             # go through layers
 
@@ -917,7 +1041,7 @@ class BlockRecurrentTransformer(nn.Module):
                     rotary_pos_emb = rotary_pos_emb,
                     xpos_scale = xpos_scale,
                     attn_mask = attn_mask,
-                    xl_memories = next(xl_memories, None),
+                    xl_memories = next(iter_xl_memories, None),
                     read_from_state_containers = self.read_state_router[layer]
                 )
 
@@ -945,7 +1069,10 @@ class BlockRecurrentTransformer(nn.Module):
             # set new xl memories and states
 
             states = next_states
-            xl_memories = next_xl_memories
+
+            if input_block_length == w:
+                xl_memories = self.mem_manager(xl_memories, next_xl_memories)
+
 
         # project to logits
 

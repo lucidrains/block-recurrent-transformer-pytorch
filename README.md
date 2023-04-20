@@ -34,6 +34,8 @@ model = BlockRecurrentTransformer(
     block_width = 512,              # block size - total receptive field is max_seq_len, 2 * block size in paper. the block furthest forwards becomes the new cached xl memories, which is a block size of 1 (please open an issue if i am wrong)
     num_state_vectors = 512,        # number of state vectors, i believe this was a single block size in the paper, but can be any amount
     recurrent_layers = (4,),        # where to place the recurrent layer(s) for states with fixed simple gating
+    use_compressed_mem = False,     # whether to use compressed memories of a single block width, from https://arxiv.org/abs/1911.05507
+    compressed_mem_factor = 4,      # compression factor of compressed memories
     use_flash_attn = True           # use flash attention, if on pytorch 2.0
 )
 
@@ -65,10 +67,10 @@ $ python train.py
 - [x] run a few experiments of fixed gating in regular transformers - does not work
 - [x] integrate <a href="https://github.com/hazyresearch/flash-attention">flash attention</a>
 - [x] cache attention mask + rotary embeddings
+- [x] add <a href="https://github.com/lucidrains/compressive-transformer-pytorch">compressed memories</a>
 
 - [ ] revisit <a href="https://github.com/lucidrains/memformer">memformer</a>
 - [ ] add ability to gate in memorizing transformers knn attention layers
-- [ ] add <a href="https://github.com/lucidrains/compressive-transformer-pytorch">compressed memories</a>
 
 ## Citations
 
