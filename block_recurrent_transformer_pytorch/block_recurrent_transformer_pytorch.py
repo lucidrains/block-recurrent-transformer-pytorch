@@ -268,14 +268,18 @@ class MemoryManager(nn.Module):
                     # make sure memory length is divisible by compression factor
 
                     new_mem_length = new_memory.shape[-2]
+
                     curtailed_length = (new_mem_length // compress_factor) * compress_factor
-                    new_memory = new_memory[..., -curtailed_length:, :]
+
+                    curtailed_slice = slice(-curtailed_length, None) if curtailed_length > 0 else slice(0, 0)
+                    new_memory = new_memory[..., curtailed_slice, :]
 
                     # compress the memory pushed to the next stage
 
-                    new_memory = rearrange(new_memory, 'm b n d -> b n (m d)')
-                    new_memory = compress_fn(new_memory)
-                    new_memory = rearrange(new_memory, 'b n (m d) -> m b n d', m = 2)
+                    if new_memory.shape[-2] > 0:
+                        new_memory = rearrange(new_memory, 'm b n d -> b n (m d)')
+                        new_memory = compress_fn(new_memory)
+                        new_memory = rearrange(new_memory, 'b n (m d) -> m b n d', m = 2)
 
                 # fifo memory queue
                 # add the new memory on the right
