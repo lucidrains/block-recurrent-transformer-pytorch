@@ -6,7 +6,7 @@ Implementation of <a href="https://arxiv.org/abs/2203.07852">Block Recurrent Tra
 
 This design is SOTA for recurrent transformers line of research, afaict.
 
-It will also include <a href="https://arxiv.org/abs/2205.14135">flash attention</a> as well as <a href="https://arxiv.org/abs/2203.08913">KNN attention layers</a>
+It will also include <a href="https://arxiv.org/abs/2205.14135">flash attention</a> as well as routed memories of up to 250k tokens using ideas from <a href="https://github.com/lucidrains/CoLT5-attention">this paper</a>
 
 ## Appreciation
 
@@ -70,7 +70,7 @@ $ python train.py
 - [x] add <a href="https://github.com/lucidrains/compressive-transformer-pytorch">compressed memories</a>
 
 - [ ] revisit <a href="https://github.com/lucidrains/memformer">memformer</a>
-- [ ] add ability to gate in memorizing transformers knn attention layers
+- [ ] try routing long distance memories of up to 250k using coordinate descent (Wright et al.)
 
 ## Citations
 
@@ -111,5 +111,12 @@ $ python train.py
 }
 ```
 
+```bibtex
+@inproceedings{Ainslie2023CoLT5FL,
+    title   = {CoLT5: Faster Long-Range Transformers with Conditional Computation},
+    author  = {Joshua Ainslie and Tao Lei and Michiel de Jong and Santiago Ontan'on and Siddhartha Brahma and Yury Zemlyanskiy and David Uthus and Mandy Guo and James Lee-Thorp and Yi Tay and Yun-Hsuan Sung and Sumit Sanghai},
+    year    = {2023}
+}
+```
 
 *Memory is Attention through Time* - Alex Graves
