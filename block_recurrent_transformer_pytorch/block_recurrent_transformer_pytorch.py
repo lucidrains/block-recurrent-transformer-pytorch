@@ -939,7 +939,6 @@ class BlockRecurrentTransformer(nn.Module):
         output = prime
 
         memories = []
-        states = []
 
         for ind in range(length - start_len):
 
